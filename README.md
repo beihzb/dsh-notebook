@@ -7,27 +7,52 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
-A native Jupyter-style notebook plugin for DeepSeek Harness: a real `ipykernel` sidecar + an in-browser cell editor, with cell behavior aligned to VS Code Jupyter.
+**A stateful, Agent-controllable Jupyter workspace for DeepSeek Harness.** A persistent `ipykernel` runtime that your DSH agent can read, edit, execute, and inspect — turning a notebook from a static artifact into an operationable target.
+
+This is not just another Notebook frontend. The kernel is **truly persistent** (variables live across cells), the notebook **saves and reloads**, and the agent has **tools** that read, modify, run, and reason about cells and their outputs. That combination gives the agent a real **Agent ↔ Kernel ↔ Artifact** loop.
+
+## Agent workflow
+
+The point of this plugin is that the DSH agent doesn't run one-shot scripts — it drives a live computational session:
+
+> User: *"Switch Harmony integration to scVI."*
+> → Agent finds the relevant cell → reads its source and context → edits the cell → executes it → checks stdout / traceback → iterates if needed.
+
+Because the kernel is persistent, the agent is operating on stateful runtime state (an `Anndata`, a GPU model, loaded data), not just assembling strings.
+
+<!-- *Screen recording coming soon.* Replace the line above with: ![demo](demo.gif) — a 30–60s clip of: user gives a task → agent edits a cell → it runs → results appear → agent adjusts → final figure. -->
 
 ## Screenshots / Demo
 
-Highlights you'll see in action: live **tqdm progress bars**, **clickable traceback** that jumps to the offending cell, the per-cell **"hand to AI"** revision box, and **inline figures** with click-to-zoom.
+- Live **tqdm progress bars** and inline figures with click-to-zoom.
+- **Clickable traceback** frames (`Cell In[N]`) that jump to the offending cell.
+- Per-cell **"hand to AI"** revision box: type a request, the agent edits and reruns that cell.
+- VS Code-aligned cell behavior (queued / executing states, execution semantics).
 
-<!-- Add a demo.gif next to this README and replace the line below with: ![demo](demo.gif) -->
-> 🎬 *Screen recording coming soon.*
+## Features (implemented)
 
-## Features
+- **Real persistent kernel**: `ipykernel` + `jupyter_client` sidecar — variables persist across cells.
+- **Agent tools** to read, edit, run, and inspect cells (`nb_get`, `nb_edit_cell`, `nb_run_cell`, ...) with structured access to outputs and tracebacks.
+- **VS Code-aligned cell UI**: circular run control, `Queued` / `Executing` status bar, execution-number glyph.
+- **VS Code-aligned execution semantics**: Restart keeps completed outputs, Interrupt stops only the current cell, Run All stops on error, plus Clear Outputs and Restart & Clear.
+- **tqdm progress bars**, **long-output folding**, **multi-image grid**.
+- **Error navigation** (click traceback to jump to the cell).
+- **Jedi kernel completion** (`df.` / `plt.` / variable names; Tab to accept; hover for docstrings).
+- **Per-cell AI revision** (version history in `cell.metadata.dsh`).
+- **Standard `.ipynb`** save / load with autosave and unsaved-changes warning.
+- **Kernel picker** over conda environments, with a friendly install hint when `ipykernel` is missing.
 
-- **Real kernel**: `ipykernel` + `jupyter_client` sidecar — variables persist across cells.
-- **VS Code-aligned cell UI**: circular run control (grey ring for queued, spinning gold ring while running), `Queued` / `Executing` status bar, small execution-number glyph. No `In [ ]` / `Out [ ]` noise.
-- **VS Code-aligned execution semantics**: Restart keeps completed outputs, Interrupt only stops the current cell, Run All stops on the first error, plus Clear Outputs and Restart & Clear.
-- **tqdm progress bars**: `\r`-refreshed progress streams are rendered as live progress bars.
-- **Long-output folding + multi-image grid**: oversized output auto-collapses; multiple figures lay out side by side.
-- **Error navigation**: `Cell In[N]` frames in a traceback are clickable and jump to the corresponding cell.
-- **Kernel completion**: `df.` / `plt.` / variable names trigger Jedi completion (Tab to accept); hover for docstrings.
-- **Per-cell AI revision**: type a change request under any cell and hand it to the AI to edit + rerun (version history lives in `cell.metadata.dsh`).
-- **Standard `.ipynb`** save / load, with autosave and unsaved-changes warning.
-- **Kernel picker**: choose from your conda environments; friendly install hint when `ipykernel` is missing.
+## Roadmap
+
+The trajectory is toward a full **agent computational workspace**, not more Notebook UI:
+
+- **Runtime introspection** — let the agent inspect live objects (`inspect_object("adata")` → `n_obs`, layers, `obsm`, `obs`/`var` columns), not just code.
+- **Structured execution results** — return `cell_id`, `execution_count`, `stdout`, `stderr`, `display_data`, `error`, `duration`, `kernel_state` to the agent for a reliable execution loop.
+- **Execution history / diff** — auditable record of cell versions, runs, and kernel restarts.
+- **Context-aware cell selection** — layer / query which cells define or depend on a variable, instead of stuffing the whole notebook into context.
+- **Execution safety** — classify read-only / lightweight / mutating / expensive / destructive operations; confirm before destructive or very long runs.
+- **Checkpoint / rollback** — recover not just code but runtime state.
+- **Remote / SLURM kernel** — run the kernel server-side / on a job while the agent drives it through the same interface.
 
 ## Install
 
@@ -39,9 +64,7 @@ Then restart `dsh web`. A **Notebook** tab appears at the top of the session.
 
 ### Kernel selection
 
-Kernel selection works as follows:
-
-- **`dsh-envsel` is an optional dependency.** If you have the environment picker installed, the notebook plugin reads its selection (`~/.dsh/envsel-state.json`) and uses the conda environment you picked for the current session as the default kernel. This keeps the notebook in sync with the environment you chose globally in DSH. Install it with:
+- **`dsh-envsel` is an optional dependency.** With the environment picker installed, the plugin reads its selection (`~/.dsh/envsel-state.json`) and uses the conda environment you picked for the session as the default kernel. Install:
 
   ```bash
   dsh plugin --profile web add @beihaizb/dsh-envsel
@@ -49,10 +72,10 @@ Kernel selection works as follows:
 
   (Source: [github.com/beihzb/dsh-envsel](https://github.com/beihzb/dsh-envsel))
 
-- **Without `dsh-envsel`** (or if no selection is recorded), the plugin falls back to the first discovered conda environment that has `ipykernel` installed.
-- **You are never locked in.** Use the kernel dropdown in the notebook toolbar to switch to any other conda environment at any time.
+- **Without `dsh-envsel`**, the plugin falls back to the first discovered conda environment that has `ipykernel` installed.
+- **You are never locked in.** Switch kernels from the toolbar dropdown at any time.
 
-The selected environment needs `ipykernel`, `jupyter_client`, and `nbformat`. If any is missing, the plugin shows a friendly error with the exact install command instead of failing silently.
+The selected environment needs `ipykernel`, `jupyter_client`, and `nbformat`. If any is missing, the plugin shows a friendly error with the exact install command.
 
 ## Tools
 

@@ -1,7 +1,7 @@
 {
   "name": "@beihaizb/dsh-notebook",
   "version": "0.1.0",
-  "description": "Native Jupyter-style notebook for DeepSeek Harness: real ipykernel sidecar, VS Code-aligned cell UI, tqdm progress, inline figures, per-cell AI revision, and .ipynb save/load.",
+  "description": "A stateful, Agent-controllable Jupyter workspace for DeepSeek Harness: a persistent ipykernel runtime the DSH agent can read, edit, execute, and inspect, with VS Code-aligned cell UI and .ipynb save/load.",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
@@ -39,7 +39,13 @@
     "jupyter",
     "notebook",
     "ipynb",
-    "ipykernel"
+    "ipykernel",
+    "agent",
+    "runtime",
+    "workspace",
+    "data-analysis",
+    "scanpy",
+    "scvi"
   ],
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
