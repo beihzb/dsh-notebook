@@ -1,0 +1,568 @@
+#!/usr/bin/env python3
+"""kernel_driver.py - Jupyter kernel sidecar for dsh-notebook.
+
+Holds a real ipykernel via jupyter_client.KernelManager. The Node Host spawns
+this process once per notebook session and drives it over line-delimited JSON
+on stdio. One kernel per sidecar process.
+
+Protocol:
+  Request  (stdin):  {"id":"<reqId>","cmd":"<cmd>", ...args}
+  Response (stdout): {"id":"<reqId>","ok":true|false, ...result}
+
+Commands:
+  start         {interpreter}        -> start kernel with given python exe
+  execute       {code, timeout?}     -> run code, return outputs + status
+  complete      {code, cursor_pos?}  -> ipykernel complete_request (Jedi)
+  inspect       {code, cursor_pos?, detail_level?} -> object docstring/type
+  interrupt                           -> interrupt current execution
+  restart                            -> restart kernel (clears state)
+  stop                               -> shutdown kernel and exit
+  ping                               -> {alive:true}
+  get_state                          -> {vars:[...], kernel_info:{...}}
+  load_ipynb    {path}               -> {cells:[...], metadata:{...}}
+  save_ipynb    {path, cells, metadata} -> {ok:true}
+  list_vars                          -> {vars:[{name,type,value}]}
+"""
+
+import sys
+import os
+import json
+import traceback
+import threading
+from queue import Queue
+
+os.environ.setdefault("PYTHONUTF8", "1")
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+
+
+def _force_utf8_stdio():
+    """Windows consoles default to cp936; Node always reads sidecar pipes as UTF-8."""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+_force_utf8_stdio()
+
+
+def _send(obj):
+    """Write one JSON line to stdout and flush."""
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False, default=str) + "\n")
+    sys.stdout.flush()
+
+
+def _log(msg):
+    """Write to stderr for diagnostics (Host captures stderr tail)."""
+    sys.stderr.write(str(msg) + "\n")
+    sys.stderr.flush()
+
+
+class KernelDriver:
+    def __init__(self):
+        self.km = None
+        self.kc = None
+        self.interpreter = None
+        self._exec_count = 0
+
+    def start(self, interpreter=None, cwd=None):
+        from jupyter_client import KernelManager
+
+        self.interpreter = interpreter or sys.executable
+        if cwd:
+            try:
+                os.chdir(cwd)
+            except Exception:
+                pass
+        self.km = KernelManager()
+        start_kwargs = {}
+        if cwd:
+            start_kwargs["cwd"] = cwd
+        try:
+            self.km.start_kernel(**start_kwargs)
+        except Exception:
+            self.km = KernelManager(kernel_name="python3")
+            self.km.start_kernel(**start_kwargs)
+        self.kc = self.km.client()
+        self.kc.start_channels()
+        try:
+            self.kc.wait_for_ready(timeout=30)
+        except Exception:
+            pass
+        return {"alive": True, "interpreter": self.interpreter, "cwd": os.getcwd()}
+
+    def _progress(self, req_id, outputs, status="running"):
+        if not req_id:
+            return
+        _send({
+            "id": req_id,
+            "event": "progress",
+            "status": status,
+            "outputs": list(outputs),
+        })
+
+    def _execute(self, code, timeout=120, req_id=None):
+        """Execute code and collect all outputs until idle."""
+        import time
+
+        msg_id = self.kc.execute(code, reply=False, store_history=True)
+        outputs = []
+        error = None
+        status = "ok"
+        execution_count = None
+        deadline = time.time() + timeout
+        last_progress = 0.0
+
+        def emit_progress(force=False):
+            nonlocal last_progress
+            now = time.time()
+            if not force and (now - last_progress) < 0.08:
+                return
+            last_progress = now
+            self._progress(req_id, outputs, "running")
+
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                status = "timeout"
+                error = {
+                    "ename": "TimeoutError",
+                    "evalue": "execution exceeded %ss" % timeout,
+                    "traceback": [],
+                }
+                break
+            try:
+                msg = self.kc.iopub_channel.get_msg(timeout=min(remaining, 0.25))
+            except Exception:
+                continue
+
+            parent = (msg.get("parent_header") or {}).get("msg_id")
+            if parent and parent != msg_id:
+                continue
+
+            msg_type = msg["header"]["msg_type"]
+            content = msg["content"]
+
+            if msg_type == "stream":
+                text = content.get("text", "")
+                name = content.get("name", "stdout")
+                if (
+                    outputs
+                    and outputs[-1].get("type") == "stream"
+                    and outputs[-1].get("name") == name
+                ):
+                    outputs[-1]["text"] = (outputs[-1].get("text") or "") + text
+                else:
+                    outputs.append({"type": "stream", "name": name, "text": text})
+                emit_progress()
+            elif msg_type == "display_data":
+                outputs.append({
+                    "type": "display_data",
+                    "data": self._serialize_data(content.get("data", {})),
+                    "metadata": content.get("metadata", {}),
+                })
+                emit_progress(True)
+            elif msg_type == "execute_result":
+                execution_count = content.get("execution_count", execution_count)
+                outputs.append({
+                    "type": "execute_result",
+                    "data": self._serialize_data(content.get("data", {})),
+                    "execution_count": execution_count,
+                })
+                emit_progress(True)
+            elif msg_type == "error":
+                status = "error"
+                error = {
+                    "ename": content.get("ename", "Error"),
+                    "evalue": content.get("evalue", ""),
+                    "traceback": content.get("traceback", []),
+                }
+                outputs.append({"type": "error", "error": error})
+                emit_progress(True)
+            elif msg_type == "clear_output":
+                wait = bool(content.get("wait"))
+                if not wait:
+                    outputs = []
+                    emit_progress(True)
+            elif msg_type == "status":
+                if content.get("execution_state") == "idle":
+                    break
+
+        try:
+            reply = self._shell_reply(msg_id, "execute_reply", timeout=2)
+            execution_count = reply.get("execution_count", execution_count)
+            rep_status = reply.get("status", status)
+            if rep_status == "error" and status == "ok":
+                status = "error"
+                if not error:
+                    error = {
+                        "ename": reply.get("ename", "Error"),
+                        "evalue": reply.get("evalue", ""),
+                        "traceback": reply.get("traceback", []),
+                    }
+                    outputs.append({"type": "error", "error": error})
+            elif rep_status == "abort":
+                status = "error"
+                if not error:
+                    error = {
+                        "ename": "AbortError",
+                        "evalue": "execution aborted",
+                        "traceback": [],
+                    }
+        except Exception:
+            pass
+
+        if execution_count is not None:
+            self._exec_count = execution_count
+        elif status != "timeout":
+            self._exec_count += 1
+            execution_count = self._exec_count
+
+        return {
+            "status": status,
+            "outputs": outputs,
+            "error": error,
+            "execution_count": execution_count,
+        }
+
+    def _serialize_data(self, data):
+        """Convert MIME-bundle into JSON-safe structures."""
+        result = {}
+        for mime, value in data.items():
+            if mime in ("image/png", "image/jpeg", "image/gif", "image/webp"):
+                result[mime] = value
+            elif mime in ("image/svg+xml", "text/plain", "text/html"):
+                result[mime] = value if isinstance(value, str) else str(value)
+            elif mime == "application/json":
+                result[mime] = value
+            else:
+                try:
+                    json.dumps(value)
+                    result[mime] = value
+                except (TypeError, ValueError):
+                    result[mime] = str(value)
+        return result
+
+    def execute(self, code, timeout=120, req_id=None):
+        if not self.kc:
+            raise RuntimeError("kernel not started")
+        return self._execute(code, timeout, req_id=req_id)
+
+    def _shell_reply(self, msg_id, reply_type, timeout=5):
+        """Wait for a shell-channel reply matching msg_id."""
+        import time
+
+        deadline = time.time() + timeout
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise TimeoutError("no %s within %ss" % (reply_type, timeout))
+            try:
+                reply = self.kc.get_shell_msg(timeout=min(remaining, 1))
+            except Exception:
+                continue
+            parent = (reply.get("parent_header") or {}).get("msg_id")
+            if parent and parent != msg_id:
+                continue
+            if reply["header"]["msg_type"] == reply_type:
+                return reply["content"]
+
+    def complete(self, code, cursor_pos=None, timeout=5):
+        if not self.kc:
+            raise RuntimeError("kernel not started")
+        if cursor_pos is None:
+            cursor_pos = len(code or "")
+        cursor_pos = max(0, min(int(cursor_pos), len(code or "")))
+        msg_id = self.kc.complete(code=code or "", cursor_pos=cursor_pos, reply=False)
+        content = self._shell_reply(msg_id, "complete_reply", timeout=timeout)
+        matches = content.get("matches") or []
+        meta = content.get("metadata") or {}
+        types = meta.get("_jupyter_types_experimental") or []
+        items = []
+        type_by_text = {}
+        for row in types:
+            if isinstance(row, dict) and row.get("text"):
+                type_by_text[row["text"]] = row
+        for m in matches:
+            info = type_by_text.get(m) or {}
+            items.append({
+                "text": m,
+                "type": info.get("type") or "value",
+                "signature": info.get("signature") or "",
+            })
+        return {
+            "matches": matches,
+            "items": items,
+            "cursor_start": content.get("cursor_start", cursor_pos),
+            "cursor_end": content.get("cursor_end", cursor_pos),
+            "status": content.get("status", "ok"),
+        }
+
+    def inspect(self, code, cursor_pos=None, detail_level=0, timeout=5):
+        if not self.kc:
+            raise RuntimeError("kernel not started")
+        if cursor_pos is None:
+            cursor_pos = len(code or "")
+        cursor_pos = max(0, min(int(cursor_pos), len(code or "")))
+        msg_id = self.kc.inspect(
+            code=code or "",
+            cursor_pos=cursor_pos,
+            detail_level=int(detail_level or 0),
+            reply=False,
+        )
+        content = self._shell_reply(msg_id, "inspect_reply", timeout=timeout)
+        data = self._serialize_data(content.get("data") or {})
+        return {
+            "found": bool(content.get("found")),
+            "data": data,
+            "status": content.get("status", "ok"),
+        }
+
+    def interrupt(self):
+        if self.km:
+            self.km.interrupt_kernel()
+            return {"ok": True}
+        return {"ok": False, "error": "kernel not started"}
+
+    def restart(self):
+        if self.km:
+            self.km.restart_kernel()
+            self._exec_count = 0
+            return {"ok": True}
+        return {"ok": False, "error": "kernel not started"}
+
+    def stop(self):
+        try:
+            if self.kc:
+                self.kc.stop_channels()
+            if self.km:
+                self.km.shutdown_kernel(now=True)
+        except Exception:
+            pass
+        return {"ok": True}
+
+    def get_state(self):
+        if not self.kc:
+            return {"alive": False}
+        return {"alive": True, "kernel_info": {"interpreter": self.interpreter or sys.executable}}
+
+    def list_vars(self):
+        """List variables in the kernel namespace."""
+        if not self.kc:
+            return {"vars": []}
+        result = self._execute(
+            "import json as _json\n"
+            "_vars = []\n"
+            "for _n in dir():\n"
+            "    if _n.startswith('_'): continue\n"
+            "    try:\n"
+            "        _v = eval(_n)\n"
+            "        _vars.append({'name': _n, 'type': type(_v).__name__, 'value': repr(_v)[:200]})\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "print(_json.dumps(_vars))\n",
+            timeout=10,
+        )
+        vars_list = []
+        for out in result.get("outputs", []):
+            if out.get("type") == "stream" and out.get("name") == "stdout":
+                try:
+                    vars_list = json.loads(out["text"].strip())
+                except Exception:
+                    pass
+        return {"vars": vars_list}
+
+    def load_ipynb(self, path):
+        import nbformat
+        nb = nbformat.read(path, as_version=4)
+        cells = []
+        for cell in nb.cells:
+            c = {
+                "id": cell.get("id", "cell-%d" % len(cells)),
+                "cell_type": cell.cell_type,
+                "source": cell.source,
+                "outputs": [],
+                "metadata": dict(cell.get("metadata", {})),
+                "execution_count": cell.get("execution_count"),
+            }
+            if cell.cell_type == "code":
+                for out in cell.get("outputs", []):
+                    c["outputs"].append(self._nb_output_to_dict(out))
+            cells.append(c)
+        return {
+            "cells": cells,
+            "metadata": dict(nb.get("metadata", {})),
+            "nbformat": nb.get("nbformat", 4),
+            "nbformat_minor": nb.get("nbformat_minor", 5),
+        }
+
+    def _nb_output_to_dict(self, out):
+        result = {"output_type": out.get("output_type", "")}
+        if out["output_type"] == "stream":
+            result["type"] = "stream"
+            result["name"] = out.get("name", "stdout")
+            result["text"] = out.get("text", "")
+        elif out["output_type"] in ("display_data", "execute_result"):
+            result["type"] = out["output_type"]
+            result["data"] = self._serialize_data(out.get("data", {}))
+            result["execution_count"] = out.get("execution_count")
+        elif out["output_type"] == "error":
+            result["type"] = "error"
+            result["error"] = {
+                "ename": out.get("ename", ""),
+                "evalue": out.get("evalue", ""),
+                "traceback": out.get("traceback", []),
+            }
+        return result
+
+    def save_ipynb(self, path, cells, metadata=None):
+        import nbformat
+        nb = nbformat.v4.new_notebook()
+        if metadata:
+            nb.metadata = metadata
+        for c in cells:
+            if c.get("cell_type") == "markdown":
+                cell = nbformat.v4.new_markdown_cell(c.get("source", ""))
+            else:
+                cell = nbformat.v4.new_code_cell(c.get("source", ""))
+                if c.get("id"):
+                    cell["id"] = c["id"]
+                if c.get("outputs"):
+                    cell["outputs"] = [self._dict_to_nb_output(o) for o in c["outputs"]]
+                    cell["execution_count"] = c.get("execution_count")
+                if c.get("metadata"):
+                    cell["metadata"] = c["metadata"]
+            nb.cells.append(cell)
+        nbformat.write(nb, path)
+        return {"ok": True, "path": path}
+
+    def _dict_to_nb_output(self, d):
+        import nbformat
+        otype = d.get("output_type", d.get("type", ""))
+        if d.get("type") == "stream" or otype == "stream":
+            return nbformat.v4.new_output(
+                "stream", name=d.get("name", "stdout"), text=d.get("text", "")
+            )
+        elif d.get("type") in ("display_data", "execute_result") or otype in (
+            "display_data",
+            "execute_result",
+        ):
+            return nbformat.v4.new_output(otype or "display_data", data=d.get("data", {}))
+        elif d.get("type") == "error" or otype == "error":
+            err = d.get("error", {})
+            return nbformat.v4.new_output(
+                "error",
+                ename=err.get("ename", ""),
+                evalue=err.get("evalue", ""),
+                traceback=err.get("traceback", []),
+            )
+        return nbformat.v4.new_output("display_data", data={"text/plain": str(d)})
+
+
+def _handle(driver, req):
+    req_id = req.get("id")
+    cmd = req.get("cmd", "")
+    try:
+        if cmd == "start":
+            res = driver.start(req.get("interpreter"), req.get("cwd"))
+            _send({"id": req_id, "ok": True, **res})
+        elif cmd == "execute":
+            res = driver.execute(req.get("code", ""), req.get("timeout", 120), req_id=req_id)
+            _send({"id": req_id, "ok": True, **res})
+        elif cmd == "complete":
+            res = driver.complete(
+                req.get("code", ""),
+                req.get("cursor_pos"),
+                req.get("timeout", 5),
+            )
+            _send({"id": req_id, "ok": True, **res})
+        elif cmd == "inspect":
+            res = driver.inspect(
+                req.get("code", ""),
+                req.get("cursor_pos"),
+                req.get("detail_level", 0),
+                req.get("timeout", 5),
+            )
+            _send({"id": req_id, "ok": True, **res})
+        elif cmd == "interrupt":
+            res = driver.interrupt()
+            _send({"id": req_id, "ok": True, **res})
+        elif cmd == "restart":
+            res = driver.restart()
+            _send({"id": req_id, "ok": True, **res})
+        elif cmd == "stop":
+            res = driver.stop()
+            _send({"id": req_id, "ok": True, **res})
+            return "stop"
+        elif cmd == "ping":
+            _send({"id": req_id, "ok": True, "alive": driver.kc is not None})
+        elif cmd == "get_state":
+            res = driver.get_state()
+            _send({"id": req_id, "ok": True, **res})
+        elif cmd == "list_vars":
+            res = driver.list_vars()
+            _send({"id": req_id, "ok": True, **res})
+        elif cmd == "load_ipynb":
+            res = driver.load_ipynb(req["path"])
+            _send({"id": req_id, "ok": True, **res})
+        elif cmd == "save_ipynb":
+            res = driver.save_ipynb(
+                req["path"], req.get("cells", []), req.get("metadata")
+            )
+            _send({"id": req_id, "ok": True, **res})
+        else:
+            _send({"id": req_id, "ok": False, "error": "unknown command: %s" % cmd})
+    except Exception as e:
+        _log("ERROR in cmd=%s: %s\n%s" % (cmd, e, traceback.format_exc()))
+        _send({
+            "id": req_id,
+            "ok": False,
+            "error": str(e),
+            "traceback": traceback.format_exc().splitlines()[-5:],
+        })
+    return None
+
+
+def run():
+    driver = KernelDriver()
+    work = Queue()
+    _send({"id": "_ready", "ok": True, "msg": "kernel_driver started, awaiting commands"})
+
+    def stdin_loop():
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                req = json.loads(line)
+            except json.JSONDecodeError as e:
+                _send({"id": None, "ok": False, "error": "invalid JSON: %s" % e})
+                continue
+            cmd = req.get("cmd", "")
+            # Interrupt/restart/stop must not wait for a blocking execute.
+            if cmd in ("interrupt", "restart", "stop"):
+                if _handle(driver, req) == "stop":
+                    work.put(None)
+                    return
+                continue
+            work.put(req)
+        work.put(None)
+
+    reader = threading.Thread(target=stdin_loop, name="dnb-stdin", daemon=True)
+    reader.start()
+    while True:
+        req = work.get()
+        if req is None:
+            break
+        if _handle(driver, req) == "stop":
+            break
+
+    try:
+        driver.stop()
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    run()
