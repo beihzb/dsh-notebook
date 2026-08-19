@@ -1,6 +1,20 @@
 # @beihaizb/dsh-notebook
 
+[![npm version](https://img.shields.io/npm/v/@beihaizb/dsh-notebook.svg)](https://www.npmjs.com/package/@beihaizb/dsh-notebook)
+[![npm downloads](https://img.shields.io/npm/dm/@beihaizb/dsh-notebook.svg)](https://www.npmjs.com/package/@beihaizb/dsh-notebook)
+[![license](https://img.shields.io/npm/l/@beihaizb/dsh-notebook.svg)](https://github.com/beihzb/dsh-notebook/blob/main/LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/beihzb/dsh-notebook.svg?style=social)](https://github.com/beihzb/dsh-notebook)
+
+[English](README.md) | [中文](README.zh-CN.md)
+
 A native Jupyter-style notebook plugin for DeepSeek Harness: a real `ipykernel` sidecar + an in-browser cell editor, with cell behavior aligned to VS Code Jupyter.
+
+## Screenshots / Demo
+
+Highlights you'll see in action: live **tqdm progress bars**, **clickable traceback** that jumps to the offending cell, the per-cell **"hand to AI"** revision box, and **inline figures** with click-to-zoom.
+
+<!-- Add a demo.gif next to this README and replace the line below with: ![demo](demo.gif) -->
+> 🎬 *Screen recording coming soon.*
 
 ## Features
 
