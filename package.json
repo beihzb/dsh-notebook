@@ -1,6 +1,6 @@
 {
   "name": "@beihaizb/dsh-notebook",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A stateful, Agent-controllable Jupyter workspace for DeepSeek Harness: a persistent ipykernel runtime the DSH agent can read, edit, execute, and inspect, with VS Code-aligned cell UI and .ipynb save/load.",
   "license": "MIT",
   "type": "module",
