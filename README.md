@@ -33,6 +33,8 @@ Because the kernel is persistent, the agent is operating on stateful runtime sta
 
 - **Real persistent kernel**: `ipykernel` + `jupyter_client` sidecar — variables persist across cells.
 - **Agent tools** to read, edit, run, and inspect cells (`nb_get`, `nb_edit_cell`, `nb_run_cell`, ...) with structured access to outputs and tracebacks.
+- **Runtime introspection for agents**: `nb_context`, `nb_list_vars`, and `nb_inspect_object` expose live kernel variables and compact notebook state; pandas `DataFrame` objects get shape / dtype / missing-value / head / summary metadata.
+- **Safe AI edit loop**: rich per-cell version snapshots, `nb_cell_history`, `nb_revert_cell`, `nb_error_context`, and `nb_edit_and_run_cell` support auditable repair-and-rerun workflows.
 - **VS Code-aligned cell UI**: circular run control, `Queued` / `Executing` status bar, execution-number glyph.
 - **VS Code-aligned execution semantics**: Restart keeps completed outputs, Interrupt stops only the current cell, Run All stops on error, plus Clear Outputs and Restart & Clear.
 - **tqdm progress bars**, **long-output folding**, **multi-image grid**.
@@ -46,9 +48,9 @@ Because the kernel is persistent, the agent is operating on stateful runtime sta
 
 The trajectory is toward a full **agent computational workspace**, not more Notebook UI:
 
-- **Runtime introspection** — let the agent inspect live objects (`inspect_object("adata")` → `n_obs`, layers, `obsm`, `obs`/`var` columns), not just code.
+- **AnnData / scientific object introspection** — extend `nb_inspect_object("adata")` with `n_obs`, layers, `obsm`, and `obs` / `var` column summaries.
 - **Structured execution results** — return `cell_id`, `execution_count`, `stdout`, `stderr`, `display_data`, `error`, `duration`, `kernel_state` to the agent for a reliable execution loop.
-- **Execution history / diff** — auditable record of cell versions, runs, and kernel restarts.
+- **Execution history / diff UI** — expose auditable cell versions in the browser, not just in tools / `cell.metadata.dsh`.
 - **Context-aware cell selection** — layer / query which cells define or depend on a variable, instead of stuffing the whole notebook into context.
 - **Execution safety** — classify read-only / lightweight / mutating / expensive / destructive operations; confirm before destructive or very long runs.
 - **Checkpoint / rollback** — recover not just code but runtime state.
@@ -79,8 +81,10 @@ The selected environment needs `ipykernel`, `jupyter_client`, and `nbformat`. If
 
 ## Tools
 
-`nb_new` / `nb_open` / `nb_save` / `nb_get` / `nb_list` /
-`nb_add_cell` / `nb_delete_cell` / `nb_move_cell` / `nb_edit_cell` /
+`nb_new` / `nb_open` / `nb_save` / `nb_get` / `nb_context` / `nb_list` /
+`nb_list_vars` / `nb_inspect_object` /
+`nb_add_cell` / `nb_delete_cell` / `nb_move_cell` / `nb_edit_cell` / `nb_edit_and_run_cell` /
+`nb_cell_history` / `nb_revert_cell` / `nb_error_context` /
 `nb_run_cell` / `nb_run_all` / `nb_apply_suggestion` /
 `nb_kernel_restart` / `nb_kernel_restart_and_clear` / `nb_kernel_interrupt` /
 `nb_kernel_list` / `nb_kernel_select` / `nb_clear_outputs` / `nb_set_cwd`

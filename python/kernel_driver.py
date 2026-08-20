@@ -21,7 +21,8 @@ Commands:
   get_state                          -> {vars:[...], kernel_info:{...}}
   load_ipynb    {path}               -> {cells:[...], metadata:{...}}
   save_ipynb    {path, cells, metadata} -> {ok:true}
-  list_vars                          -> {vars:[{name,type,value}]}
+  list_vars                          -> {vars:[{name,type,module,repr}]}
+  inspect_object {name}              -> structured live-object summary
 """
 
 import sys
@@ -102,11 +103,11 @@ class KernelDriver:
             "outputs": list(outputs),
         })
 
-    def _execute(self, code, timeout=120, req_id=None):
+    def _execute(self, code, timeout=120, req_id=None, store_history=True):
         """Execute code and collect all outputs until idle."""
         import time
 
-        msg_id = self.kc.execute(code, reply=False, store_history=True)
+        msg_id = self.kc.execute(code, reply=False, store_history=store_history)
         outputs = []
         error = None
         status = "ok"
@@ -347,31 +348,143 @@ class KernelDriver:
             return {"alive": False}
         return {"alive": True, "kernel_info": {"interpreter": self.interpreter or sys.executable}}
 
-    def list_vars(self):
-        """List variables in the kernel namespace."""
-        if not self.kc:
-            return {"vars": []}
-        result = self._execute(
-            "import json as _json\n"
-            "_vars = []\n"
-            "for _n in dir():\n"
-            "    if _n.startswith('_'): continue\n"
-            "    try:\n"
-            "        _v = eval(_n)\n"
-            "        _vars.append({'name': _n, 'type': type(_v).__name__, 'value': repr(_v)[:200]})\n"
-            "    except Exception:\n"
-            "        pass\n"
-            "print(_json.dumps(_vars))\n",
-            timeout=10,
-        )
-        vars_list = []
+    def _json_probe(self, code, timeout=10):
+        """Execute a short probe in the kernel and parse the last JSON stdout line."""
+        result = self._execute(code, timeout=timeout, store_history=False)
+        text = ""
         for out in result.get("outputs", []):
             if out.get("type") == "stream" and out.get("name") == "stdout":
-                try:
-                    vars_list = json.loads(out["text"].strip())
-                except Exception:
-                    pass
-        return {"vars": vars_list}
+                text += out.get("text", "")
+        for line in reversed(text.splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                return json.loads(line)
+            except Exception:
+                continue
+        return {}
+
+    def list_vars(self):
+        """List variables in the kernel namespace without dumping large values."""
+        if not self.kc:
+            return {"vars": []}
+        return self._json_probe(
+            r'''
+import json as _dnb_json, types as _dnb_types
+_dnb_skip_types = (
+    _dnb_types.ModuleType,
+    _dnb_types.FunctionType,
+    _dnb_types.BuiltinFunctionType,
+    _dnb_types.MethodType,
+    type,
+)
+_dnb_vars = []
+for _dnb_n, _dnb_v in sorted(list(globals().items()), key=lambda kv: kv[0]):
+    if _dnb_n.startswith('_') or _dnb_n in {'In', 'Out', 'exit', 'quit'}:
+        continue
+    try:
+        if isinstance(_dnb_v, _dnb_skip_types):
+            continue
+        _dnb_t = type(_dnb_v)
+        _dnb_r = repr(_dnb_v)
+        _dnb_vars.append({
+            'name': _dnb_n,
+            'type': _dnb_t.__name__,
+            'module': getattr(_dnb_t, '__module__', ''),
+            'repr': _dnb_r[:300],
+            'value': _dnb_r[:300],
+        })
+    except Exception as _dnb_e:
+        _dnb_vars.append({'name': _dnb_n, 'type': 'unknown', 'module': '', 'repr': '<unrepresentable: %s>' % _dnb_e})
+print(_dnb_json.dumps({'vars': _dnb_vars}, ensure_ascii=False, allow_nan=False, default=str))
+''',
+            timeout=10,
+        ) or {"vars": []}
+
+    def inspect_object(self, name):
+        """Return a structured summary for one live kernel variable."""
+        if not self.kc:
+            return {"found": False, "error": "kernel not started"}
+        name = str(name or "").strip()
+        if not name:
+            return {"found": False, "error": "name required"}
+        return self._json_probe(
+            """
+import json as _dnb_json, inspect as _dnb_inspect
+_dnb_name = %r
+_dnb_out = {'name': _dnb_name, 'found': False}
+try:
+    _dnb_obj = globals()[_dnb_name]
+    _dnb_t = type(_dnb_obj)
+    _dnb_out.update({
+        'found': True,
+        'type': _dnb_t.__name__,
+        'module': getattr(_dnb_t, '__module__', ''),
+        'repr': repr(_dnb_obj)[:1000],
+    })
+    try:
+        _dnb_doc = _dnb_inspect.getdoc(_dnb_obj) or ''
+        _dnb_out['doc'] = _dnb_doc[:2000]
+    except Exception:
+        _dnb_out['doc'] = ''
+    try:
+        import pandas as _dnb_pd
+        if isinstance(_dnb_obj, _dnb_pd.DataFrame):
+            _dnb_df = _dnb_obj
+            _dnb_cols = [str(c) for c in list(_dnb_df.columns)[:50]]
+            _dnb_dtype = {str(c): str(_dnb_df[c].dtype) for c in list(_dnb_df.columns)[:50]}
+            _dnb_missing = {str(c): int(_dnb_df[c].isna().sum()) for c in list(_dnb_df.columns)[:50]}
+            _dnb_head = _dnb_df.head(5).copy()
+            _dnb_head.columns = [str(c) for c in _dnb_head.columns]
+            try:
+                _dnb_head = _dnb_head.astype(object).where(_dnb_head.notna(), None)
+            except Exception:
+                pass
+            _dnb_num = {}
+            try:
+                _dnb_desc = _dnb_df.select_dtypes(include='number').iloc[:, :20].describe().transpose()
+                for _dnb_idx, _dnb_row in _dnb_desc.iterrows():
+                    _dnb_num[str(_dnb_idx)] = {str(k): (None if _dnb_pd.isna(v) else float(v)) for k, v in _dnb_row.to_dict().items()}
+            except Exception as _dnb_e:
+                _dnb_num = {'error': str(_dnb_e)}
+            _dnb_cat = {}
+            try:
+                for _dnb_c in list(_dnb_df.select_dtypes(exclude='number').columns)[:20]:
+                    _dnb_vc = _dnb_df[_dnb_c].astype('string').value_counts(dropna=False).head(10)
+                    _dnb_cat[str(_dnb_c)] = {
+                        'n_unique': int(_dnb_df[_dnb_c].nunique(dropna=True)),
+                        'top_values': {str(k): int(v) for k, v in _dnb_vc.items()},
+                    }
+            except Exception as _dnb_e:
+                _dnb_cat = {'error': str(_dnb_e)}
+            _dnb_out['dataframe'] = {
+                'kind': 'pandas.DataFrame',
+                'shape': [int(_dnb_df.shape[0]), int(_dnb_df.shape[1])],
+                'columns': _dnb_cols,
+                'truncated_columns': int(max(0, _dnb_df.shape[1] - len(_dnb_cols))),
+                'dtypes': _dnb_dtype,
+                'index': {
+                    'type': type(_dnb_df.index).__name__,
+                    'name': None if _dnb_df.index.name is None else str(_dnb_df.index.name),
+                    'is_unique': bool(_dnb_df.index.is_unique),
+                },
+                'memory_usage_bytes': int(_dnb_df.memory_usage(index=True, deep=True).sum()),
+                'missing': _dnb_missing,
+                'head': _dnb_head.to_dict(orient='records'),
+                'numeric_summary': _dnb_num,
+                'categorical_summary': _dnb_cat,
+            }
+    except Exception as _dnb_e:
+        _dnb_out['introspection_error'] = str(_dnb_e)
+except KeyError:
+    _dnb_out['error'] = 'variable not found'
+except Exception as _dnb_e:
+    _dnb_out['error'] = str(_dnb_e)
+print(_dnb_json.dumps(_dnb_out, ensure_ascii=False, allow_nan=False, default=str))
+""" % name,
+            timeout=15,
+        ) or {"name": name, "found": False, "error": "no JSON result"}
 
     def load_ipynb(self, path):
         import nbformat
@@ -502,6 +615,9 @@ def _handle(driver, req):
             _send({"id": req_id, "ok": True, **res})
         elif cmd == "list_vars":
             res = driver.list_vars()
+            _send({"id": req_id, "ok": True, **res})
+        elif cmd == "inspect_object":
+            res = driver.inspect_object(req.get("name", ""))
             _send({"id": req_id, "ok": True, **res})
         elif cmd == "load_ipynb":
             res = driver.load_ipynb(req["path"])

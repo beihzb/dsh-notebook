@@ -33,6 +33,8 @@
 
 - **真正的持久内核**：`ipykernel` + `jupyter_client` sidecar，变量跨 cell 保持。
 - **Agent 工具**：读取、编辑、运行、检查 cell（`nb_get` / `nb_edit_cell` / `nb_run_cell` …），结构化访问输出与 traceback。
+- **Agent 运行时自省**：`nb_context`、`nb_list_vars`、`nb_inspect_object` 暴露活内核变量和压缩后的 notebook 状态；pandas `DataFrame` 会返回 shape / dtype / 缺失值 / head / summary 等元信息。
+- **安全 AI 修改闭环**：更完整的逐 cell 版本快照，配合 `nb_cell_history`、`nb_revert_cell`、`nb_error_context`、`nb_edit_and_run_cell` 支持可审计的修错并重跑流程。
 - **VS Code 对齐的 cell UI**：圆形运行控件、`Queued` / `Executing` 状态栏、执行序号。
 - **VS Code 对齐的执行语义**：重启保留已完成输出、中断只停当前 cell、Run All 遇错停止、Clear Outputs / Restart & Clear。
 - **tqdm 进度条**、**长输出折叠**、**多图网格**。
@@ -46,9 +48,9 @@
 
 方向是完整的 **Agent 计算工作空间**，而不是堆更多 Notebook UI：
 
-- **运行时自省（Runtime introspection）** —— 让 Agent 检查存活对象（`inspect_object("adata")` → `n_obs`、layers、`obsm`、`obs`/`var` 列），而不只是代码。
+- **AnnData / 科学对象自省** —— 扩展 `nb_inspect_object("adata")`，返回 `n_obs`、layers、`obsm`、`obs` / `var` 列摘要。
 - **结构化执行结果** —— 给 Agent 返回 `cell_id`、`execution_count`、`stdout`、`stderr`、`display_data`、`error`、`duration`、`kernel_state`，建立可靠执行循环。
-- **执行历史 / diff** —— cell 版本、运行记录、内核重启的可审计历史。
+- **执行历史 / diff UI** —— 不只在工具里记录，也在界面里展示可审计的 cell 版本。
 - **上下文相关的 cell 选择** —— 分层 / 查询"哪个 cell 定义了某变量、哪些依赖它"，而不是把整个 notebook 塞进上下文。
 - **执行安全** —— 把操作分类为 只读 / 轻量 / 修改型 / 重 / 破坏性；破坏性或超长运行前要求确认。
 - **Checkpoint / 回滚** —— 不只恢复代码，还能恢复 runtime 状态。
@@ -79,8 +81,10 @@ dsh plugin --profile web add @beihaizb/dsh-notebook
 
 ## 工具
 
-`nb_new` / `nb_open` / `nb_save` / `nb_get` / `nb_list` /
-`nb_add_cell` / `nb_delete_cell` / `nb_move_cell` / `nb_edit_cell` /
+`nb_new` / `nb_open` / `nb_save` / `nb_get` / `nb_context` / `nb_list` /
+`nb_list_vars` / `nb_inspect_object` /
+`nb_add_cell` / `nb_delete_cell` / `nb_move_cell` / `nb_edit_cell` / `nb_edit_and_run_cell` /
+`nb_cell_history` / `nb_revert_cell` / `nb_error_context` /
 `nb_run_cell` / `nb_run_all` / `nb_apply_suggestion` /
 `nb_kernel_restart` / `nb_kernel_restart_and_clear` / `nb_kernel_interrupt` /
 `nb_kernel_list` / `nb_kernel_select` / `nb_clear_outputs` / `nb_set_cwd`
