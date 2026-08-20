@@ -39,6 +39,10 @@ Because the kernel is persistent, the agent is operating on stateful runtime sta
 - **VS Code-aligned execution semantics**: Restart keeps completed outputs, Interrupt stops only the current cell, Run All stops on error, plus Clear Outputs and Restart & Clear.
 - **tqdm progress bars**, **long-output folding**, **multi-image grid**.
 - **Error navigation** (click traceback to jump to the cell).
+- **Resilient frontend**: a React error boundary keeps the notebook view alive instead of going blank when an output fails to render (fixed a hooks-order crash that could blank the panel).
+- **Faster live updates**: live progress is throttled and compacted (last outputs only), state polling is reduced, and frequent updates no longer resend the full kernel list.
+- **Session-aware working directory**: the notebook default cwd/workspace follows the current DSH session; manual "set working directory" and opened-notebook cwd take priority.
+- **Hybrid-CPU hint**: on big.LITTLE (P+E core) machines a one-time, per-session hint explains how to pin the Python process to performance cores (Windows Task Manager / Activity Monitor / `taskset`), with a copy-ready `psutil` snippet; dismiss it and it won't repeat.
 - **Jedi kernel completion** (`df.` / `plt.` / variable names; Tab to accept; hover for docstrings).
 - **Per-cell AI revision** (version history in `cell.metadata.dsh`).
 - **Standard `.ipynb`** save / load with autosave and unsaved-changes warning.

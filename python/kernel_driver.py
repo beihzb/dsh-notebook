@@ -93,6 +93,20 @@ class KernelDriver:
             pass
         return {"alive": True, "interpreter": self.interpreter, "cwd": os.getcwd()}
 
+    def _progress_outputs(self, outputs):
+        """Compact transient progress payloads; final execute result still returns full outputs."""
+        compact = []
+        for out in list(outputs)[-3:]:
+            if out.get("type") == "stream":
+                item = dict(out)
+                text = item.get("text") or ""
+                if len(text) > 12000:
+                    item["text"] = "...[output truncated during live progress]...\n" + text[-12000:]
+                compact.append(item)
+            else:
+                compact.append(out)
+        return compact
+
     def _progress(self, req_id, outputs, status="running"):
         if not req_id:
             return
@@ -100,7 +114,7 @@ class KernelDriver:
             "id": req_id,
             "event": "progress",
             "status": status,
-            "outputs": list(outputs),
+            "outputs": self._progress_outputs(outputs),
         })
 
     def _execute(self, code, timeout=120, req_id=None, store_history=True):
@@ -118,7 +132,7 @@ class KernelDriver:
         def emit_progress(force=False):
             nonlocal last_progress
             now = time.time()
-            if not force and (now - last_progress) < 0.08:
+            if not force and (now - last_progress) < 0.30:
                 return
             last_progress = now
             self._progress(req_id, outputs, "running")

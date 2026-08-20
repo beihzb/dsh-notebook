@@ -39,6 +39,10 @@
 - **VS Code 对齐的执行语义**：重启保留已完成输出、中断只停当前 cell、Run All 遇错停止、Clear Outputs / Restart & Clear。
 - **tqdm 进度条**、**长输出折叠**、**多图网格**。
 - **错误定位**（点击 traceback 跳到对应 cell）。
+- **更稳的前端**：加了 React 错误边界，输出渲染异常时不再整块空白；修复了一个 hooks 顺序 bug 导致的界面偶发消失。
+- **更快的实时更新**：运行中进度节流并只发尾部输出、状态轮询降频、高频更新不再重复带完整内核列表。
+- **跟随会话的工作目录**：notebook 默认 cwd / workspace 跟随当前 DSH 会话；手动“设置工作目录”与打开 notebook 保存的 cwd 优先级更高。
+- **大小核 CPU 提示**：在混合架构（P+E 核）机器上，一次性（会话级）提示如何把 Python 进程固定到性能核（Windows 任务管理器 / 活动监视器 / `taskset`），并附一键复制的 `psutil` 片段；可关闭不再提示。
 - **Jedi 内核补全**（`df.` / `plt.` / 变量名；Tab 接受；悬停看 docstring）。
 - **每 cell AI 修改意见**（版本栈在 `cell.metadata.dsh`）。
 - **标准 `.ipynb`** 保存 / 读取，自动保存 + 未保存提醒。
