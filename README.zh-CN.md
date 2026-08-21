@@ -45,7 +45,7 @@
 - **会话隔离**：每个 DSH 会话拥有独立的 notebook、内核和工作目录，无跨会话状态泄漏。多会话可同时运行内核。
 - **内核管理器**：工具栏弹窗列出所有会话的活跃内核（会话 ID、内核名、状态），可直接关闭任一会话的内核。
 - **内核活跃指示**：状态栏显示当前会话内核是否活跃，多会话同时开内核时提醒注意内存/资源。
-- **父进程看门狗**：dsh web 被强杀时，Python sidecar 检测到父进程死亡后自动关闭 ipykernel，不留孤儿进程（跨平台：POSIX 用 getppid，Windows 用 OpenProcess）。
+- **孤儿进程自动清理**：dsh web 被强杀时，Python sidecar 检测到父进程死亡后自动关闭 ipykernel，不留孤儿进程（跨平台：POSIX 用 getppid，Windows 用 OpenProcess）。
 - **中英双语界面**：整个界面默认英文，工具栏一键切换中文，选择持久化保存。
 - **大小核 CPU 提示**：在混合架构（P+E 核）机器上，一次性（会话级）提示如何把 Python 进程固定到性能核（Windows 任务管理器 / 活动监视器 / `taskset`），并附一键复制的 `psutil` 片段；可关闭不再提示。
 - **Jedi 内核补全**（`df.` / `plt.` / 变量名；Tab 接受；悬停看 docstring）。
