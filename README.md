@@ -52,6 +52,10 @@ Because the kernel is persistent, the agent is operating on stateful runtime sta
 - **Per-cell AI revision** (version history in `cell.metadata.dsh`).
 - **Standard `.ipynb`** save / load with autosave and unsaved-changes warning.
 - **Kernel picker** over conda environments, with a friendly install hint when `ipykernel` is missing.
+- **Scoped-install compatible**: the bundle now registers under `@beihaizb/dsh-notebook` in both the host patch (`cordis.patch.yml`) and the client loader, so `dsh plugin add @beihaizb/dsh-notebook` loads out of the box (previously the unscoped patch name failed to resolve against the scoped npm package).
+- **Reliable "Hand to AI"**: fixed a regression (a local variable shadowing the i18n translator) that silently dropped the submitted suggestion before it could be sent — the cell code and your request now always reach the agent.
+- **Theme-aware cell editor**: the CodeMirror editor follows the DSH light/dark theme — oneDark in dark mode, a clean light scheme with soft-gray line numbers in light mode — and re-themes live when you switch.
+- **Localized CPU-hint snippet**: the copy-ready `psutil` snippet's comments follow the UI language (EN / 中文).
 
 ## Roadmap
 

@@ -3,6 +3,7 @@ import { EditorState, Compartment, Prec } from "@codemirror/state"
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands"
 import { python } from "@codemirror/lang-python"
 import { autocompletion, completionKeymap, startCompletion, acceptCompletion, closeCompletion } from "@codemirror/autocomplete"
+import { syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language"
 import { oneDark } from "@codemirror/theme-one-dark"
 
 window.dnbCM = {
@@ -25,5 +26,7 @@ window.dnbCM = {
   startCompletion,
   acceptCompletion,
   closeCompletion,
+  syntaxHighlighting,
+  defaultHighlightStyle,
   oneDark,
 }

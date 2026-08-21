@@ -52,6 +52,10 @@
 - **每 cell AI 修改意见**（版本栈在 `cell.metadata.dsh`）。
 - **标准 `.ipynb`** 保存 / 读取，自动保存 + 未保存提醒。
 - **内核选择**：从 conda 环境列表选内核；缺 ipykernel 时给友好安装提示。
+- **兼容 scoped 安装**：bundle 现在在 host 补丁（`cordis.patch.yml`）和 client 加载器里都注册为 `@beihaizb/dsh-notebook`，`dsh plugin add @beihaizb/dsh-notebook` 可直接加载（此前补丁名不带 scope，无法对上 npm 的 scoped 包名）。
+- **「交给 AI」更可靠**：修复了一个回归（局部变量遮蔽 i18n 翻译函数），此前提交的意见会在发送前被静默丢弃——现在 cell 代码和你的请求一定能送达 agent。
+- **编辑器跟随主题**：CodeMirror 编辑器跟随 DSH 深浅主题——深色用 oneDark，浅色用清爽的浅色方案（行号柔和灰），切换主题时实时重绘。
+- **CPU 提示片段本地化**：一键复制的 `psutil` 片段注释跟随界面语言（中 / EN）。
 
 ## Roadmap
 
