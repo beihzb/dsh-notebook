@@ -56,14 +56,18 @@ Because the kernel is persistent, the agent is operating on stateful runtime sta
 - **Reliable "Hand to AI"**: fixed a regression (a local variable shadowing the i18n translator) that silently dropped the submitted suggestion before it could be sent — the cell code and your request now always reach the agent.
 - **Theme-aware cell editor**: the CodeMirror editor follows the DSH light/dark theme — oneDark in dark mode, a clean light scheme with soft-gray line numbers in light mode — and re-themes live when you switch.
 - **Localized CPU-hint snippet**: the copy-ready `psutil` snippet's comments follow the UI language (EN / 中文).
+- **Structured execution results (v0.2.2)**: every run tool (`nb_run_cell`, `nb_edit_and_run_cell`, `nb_run_all`) returns a canonical execution envelope — `status`, `execution_count`, `duration_ms`, `kernel_state`, merged `stdout`/`stderr`, `outputs_summary`, image paths, `error` + `traceback_text`, and `execution_index` — for a reliable agent execution loop.
+- **Context-safe long output (v0.2.2)**: three-layer protection keeps runaway output from blowing up the agent context — a per-stream driver cap (500 KB), a 6 KB head+tail summary in the envelope, and the full merged text spilled to `<notebook>_files/` with a path the agent reads on demand. Base64 images stay in the UI; the envelope carries file paths instead.
+- **Per-execution history (v0.2.2)**: each run is recorded in `cell.metadata.dsh.executions` (capped at 50 per cell, persisted with the notebook) — the foundation for the execution-history UI and replay-based recovery.
+- **Honest Run All completion (v0.2.2)**: the "All cells run" toast now fires only when every cell has actually reached a terminal state, instead of instantly when the request returns.
+- **Immediate queue feedback (v0.2.2)**: running a second cell shows its `Queued` state right away (the HTTP run endpoint no longer blocks on `wait` for the UI), and no snapshot swap blanks the editor mid-run.
 
 ## Roadmap
 
 The trajectory is toward a full **agent computational workspace**, not more Notebook UI:
 
 - **AnnData / scientific object introspection** — extend `nb_inspect_object("adata")` with `n_obs`, layers, `obsm`, and `obs` / `var` column summaries.
-- **Structured execution results** — return `cell_id`, `execution_count`, `stdout`, `stderr`, `display_data`, `error`, `duration`, `kernel_state` to the agent for a reliable execution loop.
-- **Execution history / diff UI** — expose auditable cell versions in the browser, not just in tools / `cell.metadata.dsh`.
+- **Execution history / diff UI** — expose auditable cell versions in the browser, not just in tools / `cell.metadata.dsh` (per-execution records are already collected).
 - **Context-aware cell selection** — layer / query which cells define or depend on a variable, instead of stuffing the whole notebook into context.
 - **Execution safety** — classify read-only / lightweight / mutating / expensive / destructive operations; confirm before destructive or very long runs.
 - **Checkpoint / rollback** — recover not just code but runtime state.
@@ -72,12 +76,12 @@ The trajectory is toward a full **agent computational workspace**, not more Note
 ## Install
 
 ```bash
-dsh plugin --profile web add @beihaizb/dsh-notebook@0.2.1
+dsh plugin --profile web add @beihaizb/dsh-notebook@0.2.2
 ```
 
 Then restart `dsh web`. A **Notebook** tab appears at the top of the session.
 
-> **Note on version pinning**: if you install shortly after a release, pnpm's supply-chain policy (`minimumReleaseAge`) may skip the just-published version and install an older one instead. Pin the version explicitly as above (`@beihaizb/dsh-notebook@0.2.1`), or use `@beihaizb/dsh-notebook@latest` once the release is older than the policy window.
+> **Note on version pinning**: if you install shortly after a release, pnpm's supply-chain policy (`minimumReleaseAge`) may skip the just-published version and install an older one instead. Pin the version explicitly as above (`@beihaizb/dsh-notebook@0.2.2`), or use `@beihaizb/dsh-notebook@latest` once the release is older than the policy window.
 
 ### Kernel selection
 

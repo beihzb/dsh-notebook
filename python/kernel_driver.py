@@ -61,6 +61,12 @@ def _log(msg):
     sys.stderr.flush()
 
 
+# Per-stream collection cap. Protects stdio transport, host memory, and the
+# agent context: a runaway print() loop cannot grow unbounded. Excess chars
+# are dropped (head trimmed), tail preserved, and `truncated` is flagged.
+MAX_STREAM_CHARS = 500000
+
+
 class KernelDriver:
     def __init__(self):
         self.km = None
@@ -127,6 +133,7 @@ class KernelDriver:
         error = None
         status = "ok"
         execution_count = None
+        truncated = False
         deadline = time.time() + timeout
         last_progress = 0.0
 
@@ -168,7 +175,13 @@ class KernelDriver:
                     and outputs[-1].get("type") == "stream"
                     and outputs[-1].get("name") == name
                 ):
-                    outputs[-1]["text"] = (outputs[-1].get("text") or "") + text
+                    merged = (outputs[-1].get("text") or "") + text
+                    if len(merged) > MAX_STREAM_CHARS:
+                        dropped = len(merged) - MAX_STREAM_CHARS
+                        merged = "...[%d chars truncated]...\n" % dropped + merged[-MAX_STREAM_CHARS:]
+                        truncated = True
+                        outputs[-1]["truncated"] = True
+                    outputs[-1]["text"] = merged
                 else:
                     outputs.append({"type": "stream", "name": name, "text": text})
                 emit_progress()
@@ -235,11 +248,38 @@ class KernelDriver:
             self._exec_count += 1
             execution_count = self._exec_count
 
+        stdout_parts = []
+        stderr_parts = []
+        for out in outputs:
+            if out.get("type") == "stream":
+                if out.get("name") == "stderr":
+                    stderr_parts.append(out.get("text") or "")
+                else:
+                    stdout_parts.append(out.get("text") or "")
+
+        try:
+            kernel_alive = bool(self.kc and self.kc.is_alive())
+        except Exception:
+            kernel_alive = True
+        if not kernel_alive:
+            kernel_state = "dead"
+        elif status == "error":
+            kernel_state = "error"
+        elif status == "timeout":
+            # Kernel may still be executing the abandoned request.
+            kernel_state = "busy"
+        else:
+            kernel_state = "idle"
+
         return {
             "status": status,
             "outputs": outputs,
             "error": error,
             "execution_count": execution_count,
+            "stdout": "".join(stdout_parts),
+            "stderr": "".join(stderr_parts),
+            "truncated": truncated,
+            "kernel_state": kernel_state,
         }
 
     def _serialize_data(self, data):

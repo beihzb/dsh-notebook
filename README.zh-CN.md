@@ -56,14 +56,18 @@
 - **「交给 AI」更可靠**：修复了一个回归（局部变量遮蔽 i18n 翻译函数），此前提交的意见会在发送前被静默丢弃——现在 cell 代码和你的请求一定能送达 agent。
 - **编辑器跟随主题**：CodeMirror 编辑器跟随 DSH 深浅主题——深色用 oneDark，浅色用清爽的浅色方案（行号柔和灰），切换主题时实时重绘。
 - **CPU 提示片段本地化**：一键复制的 `psutil` 片段注释跟随界面语言（中 / EN）。
+- **结构化执行结果（v0.2.2）**：所有运行工具（`nb_run_cell`、`nb_edit_and_run_cell`、`nb_run_all`）现在返回统一执行信封——`status`、`execution_count`、`duration_ms`、`kernel_state`、合并的 `stdout`/`stderr`、`outputs_summary`、图片路径、`error` + `traceback_text`、`execution_index`——为 Agent 建立可靠执行循环。
+- **长输出不撑爆上下文（v0.2.2）**：三层防线防止失控输出灌爆 Agent 上下文——driver 单流上限（500 KB）、信封内 6 KB 头尾摘要、完整合并文本落盘到 `<notebook>_files/` 并返回路径供 Agent 按需读取。base64 图片只留在 UI，信封给文件路径。
+- **逐次执行历史（v0.2.2）**：每次运行都记录到 `cell.metadata.dsh.executions`（每 cell 上限 50 条，随 notebook 持久化）——执行历史 UI 与重放式恢复的地基。
+- **Run All 完成提示更诚实（v0.2.2）**：只有所有 cell 真正跑到终态（ok/error）才弹「全部运行完成」，不再在请求一返回就假完成。
+- **排队即时反馈（v0.2.2）**：运行第二个 cell 时立刻显示 `Queued` 状态（HTTP 运行端点不再为 UI 阻塞等待），且运行中不会出现快照交换导致的编辑器闪空。
 
 ## Roadmap
 
 方向是完整的 **Agent 计算工作空间**，而不是堆更多 Notebook UI：
 
 - **AnnData / 科学对象自省** —— 扩展 `nb_inspect_object("adata")`，返回 `n_obs`、layers、`obsm`、`obs` / `var` 列摘要。
-- **结构化执行结果** —— 给 Agent 返回 `cell_id`、`execution_count`、`stdout`、`stderr`、`display_data`、`error`、`duration`、`kernel_state`，建立可靠执行循环。
-- **执行历史 / diff UI** —— 不只在工具里记录，也在界面里展示可审计的 cell 版本。
+- **执行历史 / diff UI** —— 不只在工具里记录，也在界面里展示可审计的 cell 版本（逐次执行记录已开始收集）。
 - **上下文相关的 cell 选择** —— 分层 / 查询"哪个 cell 定义了某变量、哪些依赖它"，而不是把整个 notebook 塞进上下文。
 - **执行安全** —— 把操作分类为 只读 / 轻量 / 修改型 / 重 / 破坏性；破坏性或超长运行前要求确认。
 - **Checkpoint / 回滚** —— 不只恢复代码，还能恢复 runtime 状态。
@@ -72,12 +76,12 @@
 ## 安装
 
 ```bash
-dsh plugin --profile web add @beihaizb/dsh-notebook@0.2.1
+dsh plugin --profile web add @beihaizb/dsh-notebook@0.2.2
 ```
 
 然后重启 `dsh web`。会话顶部会出现 **Notebook** 标签。
 
-> **版本锁定说明**：如果刚发布不久就安装，pnpm 的供应链策略（`minimumReleaseAge`）可能跳过刚发布的版本、自动装到旧版。遇到这种情况请像上面那样显式指定版本号（`@beihaizb/dsh-notebook@0.2.1`），或等发布超过策略窗口后用 `@beihaizb/dsh-notebook@latest`。
+> **版本锁定说明**：如果刚发布不久就安装，pnpm 的供应链策略（`minimumReleaseAge`）可能跳过刚发布的版本、自动装到旧版。遇到这种情况请像上面那样显式指定版本号（`@beihaizb/dsh-notebook@0.2.2`），或等发布超过策略窗口后用 `@beihaizb/dsh-notebook@latest`。
 
 ### 内核选择
 
