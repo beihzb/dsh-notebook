@@ -30,6 +30,7 @@ import os
 import json
 import traceback
 import threading
+import time
 from queue import Queue
 
 os.environ.setdefault("PYTHONUTF8", "1")
@@ -654,6 +655,61 @@ def _handle(driver, req):
     return None
 
 
+def _parent_alive(pid):
+    """Check if process `pid` is alive WITHOUT sending any signal.
+
+    Critical: on Windows, os.kill(pid, 0) does NOT just check existence -
+    it calls TerminateProcess and KILLS the target.  We use the Win32 API
+    OpenProcess to query instead.  On POSIX, os.kill(pid, 0) is a safe
+    no-op that only checks existence.
+    """
+    if sys.platform == "win32":
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        SYNCHRONIZE = 0x00100000
+        ERROR_ACCESS_DENIED = 5
+        handle = kernel32.OpenProcess(SYNCHRONIZE, False, int(pid))
+        if not handle:
+            # ERROR_ACCESS_DENIED means the process exists but we lack
+            # access - treat as alive to avoid false-positive cleanup.
+            return kernel32.GetLastError() == ERROR_ACCESS_DENIED
+        kernel32.CloseHandle(handle)
+        return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _start_parent_watchdog(driver, interval=2.0):
+    """Exit this sidecar if the parent process (dsh web) dies.
+
+    Without this, force-killing dsh web leaves python.exe / ipykernel
+    orphans that keep consuming memory. Cross-platform detection:
+      - Linux/macOS: a dead parent reparents us to PID 1 (init/launchd),
+        so os.getppid() changes.
+      - Windows: no reparent; os.getppid() keeps the stale value, so we
+        query the pid via OpenProcess (NOT os.kill, which kills on Windows).
+    """
+    parent = os.getppid()
+    def watch():
+        while True:
+            time.sleep(interval)
+            if os.getppid() != parent:
+                break
+            if not _parent_alive(parent):
+                break
+        try:
+            driver.stop()
+        except Exception:
+            pass
+        os._exit(0)
+    t = threading.Thread(target=watch, name="dnb-parent-watchdog", daemon=True)
+    t.start()
+    return t
+
+
 def run():
     driver = KernelDriver()
     work = Queue()
@@ -681,6 +737,7 @@ def run():
 
     reader = threading.Thread(target=stdin_loop, name="dnb-stdin", daemon=True)
     reader.start()
+    _start_parent_watchdog(driver)
     while True:
         req = work.get()
         if req is None:

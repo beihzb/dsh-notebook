@@ -42,6 +42,11 @@ Because the kernel is persistent, the agent is operating on stateful runtime sta
 - **Resilient frontend**: a React error boundary keeps the notebook view alive instead of going blank when an output fails to render (fixed a hooks-order crash that could blank the panel).
 - **Faster live updates**: live progress is throttled and compacted (last outputs only), state polling is reduced, and frequent updates no longer resend the full kernel list.
 - **Session-aware working directory**: the notebook default cwd/workspace follows the current DSH session; manual "set working directory" and opened-notebook cwd take priority.
+- **Per-session isolation**: each DSH session owns an independent notebook, kernel, and working directory — no cross-session state leakage. Multiple sessions can run kernels simultaneously.
+- **Kernel manager**: a toolbar popup lists all active kernels across sessions (session ID, kernel name, status); close any session's kernel directly from the manager.
+- **Kernel activity indicator**: a status bar shows whether the current session's kernel is active and warns when multiple sessions have kernels running (memory / resource awareness).
+- **Parent watchdog**: if `dsh web` is force-killed, the Python sidecar detects parent-process death and auto-shuts-down its `ipykernel` — no orphan processes (cross-platform: `getppid` on POSIX, `OpenProcess` on Windows).
+- **Bilingual UI (EN / 中文)**: the entire interface defaults to English with a one-click language toggle in the toolbar; your choice persists across sessions.
 - **Hybrid-CPU hint**: on big.LITTLE (P+E core) machines a one-time, per-session hint explains how to pin the Python process to performance cores (Windows Task Manager / Activity Monitor / `taskset`), with a copy-ready `psutil` snippet; dismiss it and it won't repeat.
 - **Jedi kernel completion** (`df.` / `plt.` / variable names; Tab to accept; hover for docstrings).
 - **Per-cell AI revision** (version history in `cell.metadata.dsh`).
