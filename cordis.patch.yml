@@ -2,4 +2,4 @@
 # Host half mounts here; Client half is discovered via package.json dsh.client.
 - insert:
     - id: dsh-notebook
-      name: 'dsh-notebook'
+      name: '@beihaizb/dsh-notebook'
