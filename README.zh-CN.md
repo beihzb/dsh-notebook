@@ -72,10 +72,12 @@
 ## 安装
 
 ```bash
-dsh plugin --profile web add @beihaizb/dsh-notebook
+dsh plugin --profile web add @beihaizb/dsh-notebook@0.2.1
 ```
 
 然后重启 `dsh web`。会话顶部会出现 **Notebook** 标签。
+
+> **版本锁定说明**：如果刚发布不久就安装，pnpm 的供应链策略（`minimumReleaseAge`）可能跳过刚发布的版本、自动装到旧版。遇到这种情况请像上面那样显式指定版本号（`@beihaizb/dsh-notebook@0.2.1`），或等发布超过策略窗口后用 `@beihaizb/dsh-notebook@latest`。
 
 ### 内核选择
 
