@@ -1,6 +1,8 @@
-# v0.2.3
+# v0.2.4
 
 ANSI escape codes no longer leak into the notebook output area (fixes [#2](https://github.com/beihzb/dsh-notebook/issues/2)).
+
+> **Version note**: the first attempt at this fix was tagged v0.2.3, but that version could not be published to npm (npm forbids re-publishing an unpublished version number). This release carries the identical fix under v0.2.4.
 
 ## Fixes
 
@@ -12,9 +14,9 @@ ANSI escape codes no longer leak into the notebook output area (fixes [#2](https
 ## Install
 
 ```bash
-dsh plugin --profile web add @beihaizb/dsh-notebook@0.2.3
+dsh plugin --profile web add @beihaizb/dsh-notebook@0.2.4
 ```
 
 Then restart `dsh web`. A **Notebook** tab appears at the top of the session.
 
-> **Version pinning**: if you install shortly after this release, pnpm's supply-chain policy (`minimumReleaseAge`) may skip the just-published version and install an older one. Pin the version explicitly (`@beihaizb/dsh-notebook@0.2.3`), or use `@latest` once the release is older than the policy window.
+> **Version pinning**: if you install shortly after this release, pnpm's supply-chain policy (`minimumReleaseAge`) may skip the just-published version and install an older one. Pin the version explicitly (`@beihaizb/dsh-notebook@0.2.4`), or use `@latest` once the release is older than the policy window.

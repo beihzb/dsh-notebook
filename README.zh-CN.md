@@ -61,7 +61,7 @@
 - **逐次执行历史（v0.2.2）**：每次运行都记录到 `cell.metadata.dsh.executions`（每 cell 上限 50 条，随 notebook 持久化）——执行历史 UI 与重放式恢复的地基。
 - **Run All 完成提示更诚实（v0.2.2）**：只有所有 cell 真正跑到终态（ok/error）才弹「全部运行完成」，不再在请求一返回就假完成。
 - **排队即时反馈（v0.2.2）**：运行第二个 cell 时立刻显示 `Queued` 状态（HTTP 运行端点不再为 UI 阻塞等待），且运行中不会出现快照交换导致的编辑器闪空。
-- **ANSI 流输出不再乱码（v0.2.3）**：含 ANSI 转义码但不含 `\r` 的内核流输出（彩色 Pdb 提示符、`colorama` 彩色打印）现在会在渲染前剥离转义码——此前虽然算出了清洗文本，渲染时却回退到原始 `o.text`，导致 `[32m`/`[0m` 垃圾原样显示在输出区。错误标题（`evalue`）同样处理。
+- **ANSI 流输出不再乱码（v0.2.4）**：含 ANSI 转义码但不含 `\r` 的内核流输出（彩色 Pdb 提示符、`colorama` 彩色打印）现在会在渲染前剥离转义码——此前虽然算出了清洗文本，渲染时却回退到原始 `o.text`，导致 `[32m`/`[0m` 垃圾原样显示在输出区。错误标题（`evalue`）同样处理。
 
 ## Roadmap
 
@@ -77,12 +77,12 @@
 ## 安装
 
 ```bash
-dsh plugin --profile web add @beihaizb/dsh-notebook@0.2.3
+dsh plugin --profile web add @beihaizb/dsh-notebook@0.2.4
 ```
 
 然后重启 `dsh web`。会话顶部会出现 **Notebook** 标签。
 
-> **版本锁定说明**：如果刚发布不久就安装，pnpm 的供应链策略（`minimumReleaseAge`）可能跳过刚发布的版本、自动装到旧版。遇到这种情况请像上面那样显式指定版本号（`@beihaizb/dsh-notebook@0.2.3`），或等发布超过策略窗口后用 `@beihaizb/dsh-notebook@latest`。
+> **版本锁定说明**：如果刚发布不久就安装，pnpm 的供应链策略（`minimumReleaseAge`）可能跳过刚发布的版本、自动装到旧版。遇到这种情况请像上面那样显式指定版本号（`@beihaizb/dsh-notebook@0.2.4`），或等发布超过策略窗口后用 `@beihaizb/dsh-notebook@latest`。
 
 ### 内核选择
 

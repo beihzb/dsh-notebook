@@ -61,7 +61,7 @@ Because the kernel is persistent, the agent is operating on stateful runtime sta
 - **Per-execution history (v0.2.2)**: each run is recorded in `cell.metadata.dsh.executions` (capped at 50 per cell, persisted with the notebook) — the foundation for the execution-history UI and replay-based recovery.
 - **Honest Run All completion (v0.2.2)**: the "All cells run" toast now fires only when every cell has actually reached a terminal state, instead of instantly when the request returns.
 - **Immediate queue feedback (v0.2.2)**: running a second cell shows its `Queued` state right away (the HTTP run endpoint no longer blocks on `wait` for the UI), and no snapshot swap blanks the editor mid-run.
-- **Clean ANSI stream output (v0.2.3)**: kernel stream text that contains ANSI escape sequences without `\r` (colored Pdb prompts, `colorama` prints) is now stripped before rendering — previously the cleaned string was computed but the raw `o.text` was rendered, leaking literal `[32m`/`[0m` garbage into the output area. Error titles (`evalue`) get the same treatment.
+- **Clean ANSI stream output (v0.2.4)**: kernel stream text that contains ANSI escape sequences without `\r` (colored Pdb prompts, `colorama` prints) is now stripped before rendering — previously the cleaned string was computed but the raw `o.text` was rendered, leaking literal `[32m`/`[0m` garbage into the output area. Error titles (`evalue`) get the same treatment.
 
 ## Roadmap
 
@@ -77,12 +77,12 @@ The trajectory is toward a full **agent computational workspace**, not more Note
 ## Install
 
 ```bash
-dsh plugin --profile web add @beihaizb/dsh-notebook@0.2.3
+dsh plugin --profile web add @beihaizb/dsh-notebook@0.2.4
 ```
 
 Then restart `dsh web`. A **Notebook** tab appears at the top of the session.
 
-> **Note on version pinning**: if you install shortly after a release, pnpm's supply-chain policy (`minimumReleaseAge`) may skip the just-published version and install an older one instead. Pin the version explicitly as above (`@beihaizb/dsh-notebook@0.2.3`), or use `@beihaizb/dsh-notebook@latest` once the release is older than the policy window.
+> **Note on version pinning**: if you install shortly after a release, pnpm's supply-chain policy (`minimumReleaseAge`) may skip the just-published version and install an older one instead. Pin the version explicitly as above (`@beihaizb/dsh-notebook@0.2.4`), or use `@beihaizb/dsh-notebook@latest` once the release is older than the policy window.
 
 ### Kernel selection
 
