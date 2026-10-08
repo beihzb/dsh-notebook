@@ -305,6 +305,20 @@ class KernelDriver:
             raise RuntimeError("kernel not started")
         return self._execute(code, timeout, req_id=req_id)
 
+    def chdir(self, path, timeout=30, req_id=None):
+        """Change the live kernel's working directory WITHOUT a restart.
+
+        Sent through the sequential shell channel (store_history=False, so
+        the kernel's execution counter is untouched), it queues behind any
+        in-flight cell and applies when the queue drains. Replaces the old
+        kill-and-restart cwd sync that interrupted running cells.
+        """
+        import json as _json
+        if not self.kc:
+            return {"ok": True, "note": "kernel not started; cwd applies at next start"}
+        code = "import os; os.chdir(%s)" % _json.dumps(str(path))
+        return self._execute(code, timeout=timeout, req_id=req_id, store_history=False)
+
     def _shell_reply(self, msg_id, reply_type, timeout=5):
         """Wait for a shell-channel reply matching msg_id."""
         import time
@@ -637,6 +651,9 @@ def _handle(driver, req):
             _send({"id": req_id, "ok": True, **res})
         elif cmd == "execute":
             res = driver.execute(req.get("code", ""), req.get("timeout", 120), req_id=req_id)
+            _send({"id": req_id, "ok": True, **res})
+        elif cmd == "chdir":
+            res = driver.chdir(req.get("path", ""), req.get("timeout", 30), req_id=req_id)
             _send({"id": req_id, "ok": True, **res})
         elif cmd == "complete":
             res = driver.complete(
