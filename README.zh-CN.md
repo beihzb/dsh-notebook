@@ -62,6 +62,11 @@
 - **Run All 完成提示更诚实（v0.2.2）**：只有所有 cell 真正跑到终态（ok/error）才弹「全部运行完成」，不再在请求一返回就假完成。
 - **排队即时反馈（v0.2.2）**：运行第二个 cell 时立刻显示 `Queued` 状态（HTTP 运行端点不再为 UI 阻塞等待），且运行中不会出现快照交换导致的编辑器闪空。
 - **ANSI 流输出不再乱码（v0.2.4）**：含 ANSI 转义码但不含 `\r` 的内核流输出（彩色 Pdb 提示符、`colorama` 彩色打印）现在会在渲染前剥离转义码——此前虽然算出了清洗文本，渲染时却回退到原始 `o.text`，导致 `[32m`/`[0m` 垃圾原样显示在输出区。错误标题（`evalue`）同样处理。
+- **长输出折叠真正可用（v0.3.0）**：v0.2.2 加上的折叠从未生效——唯一产生高度钳制的 `fold` 类，其判定却来自"已被钳制元素"的测量，溢出永远测不到，按钮也就不出现。现在改为测量内层未被钳制的元素，且折叠高度与判定共用同一个 `FOLD_PX` 常量；按钮还会显示隐藏规模（如「展开全部（3,000 行）」）。
+- **超大输出只渲染头尾（v0.3.0）**：单个文本块超过 4,000 行或 200 KB 时，只渲染前 300 行 + 后 100 行，并明确标注「… 已省略 N 行」与一键「显示全部 N 行」——500 KB 的流不必为了折叠而全部驻留 DOM。
+- **全新会话也能进 Notebook（v0.3.0）**：会话空白时 DSH 不渲染 `conversation.view` slot，所以此前必须先发一句话才能看到 Notebook 标签。现在空白会话的输入框上方会出现「📓 在本会话打开 Notebook」入口，点击即激活本视图并让常规视图标签栏出现（随后宿主会记住该会话的选择）。
+- **切换视图不再丢滚动位置（v0.3.0）**：宿主同一时刻只渲染一个视图，切到「对话」会卸载 notebook 并把位置重置到顶部。现在滚动偏移与每个 cell 的展开/折叠选择都按会话记忆，切回来自动恢复。
+- **支持 DSH 0.2.0（v0.3.0）**：`peerDependencies` 现在同时覆盖 `0.1.x-rc` 与 `0.2.0-rc` 两条线（`@deepseek-ai/dsh-tools: ^0.1.0-rc.6 || ^0.2.0-rc.1`），DSH 启动期的兼容性门禁不再拒绝本插件——旧的 `^0.1.0-rc.6` 上界是 `<0.2.0`，而只要有 `@deepseek-ai/dsh*` peer 不满足当前运行版本，门禁会**跳过整个 bundle**。client 清单里也改为指向真正提供 `slots` 服务的 client row `@deepseek-ai/dsh-client-ui-renderer`，不再引用根本不存在的 `@deepseek-ai/dsh-client-runtime`。
 
 ## Roadmap
 
@@ -74,15 +79,19 @@
 - **Checkpoint / 回滚** —— 不只恢复代码，还能恢复 runtime 状态。
 - **远程 / SLURM 内核** —— 内核跑在服务器 / 作业节点上，Agent 通过同一接口驱动它。
 
+## 兼容性
+
+支持的 DSH 运行时线：`0.1.x-rc` 与 `0.2.0-rc`，已在 `0.1.7-rc.2` 与 `0.2.0-rc.2` 上核对（插件声明 `@deepseek-ai/dsh-tools: ^0.1.0-rc.6 || ^0.2.0-rc.1`）。若插件的 `@deepseek-ai/dsh*` peer 区间不包含当前运行版本，DSH 会在启动时拒绝并**跳过整个 bundle**——在尚未验证的新版本线上，请用精确版本豁免（`dsh plugin allow-version` 或插件管理器），而不是强行加载。
+
 ## 安装
 
 ```bash
-dsh plugin --profile web add @beihaizb/dsh-notebook@0.2.4
+dsh plugin --profile web add @beihaizb/dsh-notebook@0.3.0
 ```
 
 然后重启 `dsh web`。会话顶部会出现 **Notebook** 标签。
 
-> **版本锁定说明**：如果刚发布不久就安装，pnpm 的供应链策略（`minimumReleaseAge`）可能跳过刚发布的版本、自动装到旧版。遇到这种情况请像上面那样显式指定版本号（`@beihaizb/dsh-notebook@0.2.4`），或等发布超过策略窗口后用 `@beihaizb/dsh-notebook@latest`。
+> **版本锁定说明**：如果刚发布不久就安装，pnpm 的供应链策略（`minimumReleaseAge`）可能跳过刚发布的版本、自动装到旧版。遇到这种情况请像上面那样显式指定版本号（`@beihaizb/dsh-notebook@0.3.0`），或等发布超过策略窗口后用 `@beihaizb/dsh-notebook@latest`。
 
 ### 内核选择
 

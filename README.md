@@ -62,6 +62,11 @@ Because the kernel is persistent, the agent is operating on stateful runtime sta
 - **Honest Run All completion (v0.2.2)**: the "All cells run" toast now fires only when every cell has actually reached a terminal state, instead of instantly when the request returns.
 - **Immediate queue feedback (v0.2.2)**: running a second cell shows its `Queued` state right away (the HTTP run endpoint no longer blocks on `wait` for the UI), and no snapshot swap blanks the editor mid-run.
 - **Clean ANSI stream output (v0.2.4)**: kernel stream text that contains ANSI escape sequences without `\r` (colored Pdb prompts, `colorama` prints) is now stripped before rendering — previously the cleaned string was computed but the raw `o.text` was rendered, leaking literal `[32m`/`[0m` garbage into the output area. Error titles (`evalue`) get the same treatment.
+- **Long-output folding actually works (v0.3.0)**: the fold shipped in v0.2.2 could never trigger — the `fold` class (the only thing that clamps the height) was gated on a measurement taken from the already-clamped element, so overflow was never detected and the button never appeared. The overflow test now measures an inner, unclamped element against one shared `FOLD_PX` constant, and the button reports the hidden size ("Expand all (3,000 lines)").
+- **Oversized output renders head+tail (v0.3.0)**: a single text block above 4,000 lines or 200 KB renders its first 300 and last 100 lines with an explicit "… N lines omitted" marker and a one-click "Show all N lines" — a 500 KB stream no longer has to live in the DOM to be folded.
+- **Notebook is reachable in a brand-new session (v0.3.0)**: DSH omits the `conversation.view` slot while a session is blank, so the Notebook tab used to require sending a message first. A "📓 Open Notebook in this session" entry now appears above the composer in a blank session; it activates this View target, which reveals the normal View tabs (and the host then remembers your choice for that session).
+- **Scroll position survives View switches (v0.3.0)**: the shell renders one View at a time, so switching to 对话 used to unmount the notebook and reset it to the top. The scroll offset and each cell's folded/expanded choice are now remembered per session and restored when you come back.
+- **DSH 0.2.0 support (v0.3.0)**: `peerDependencies` now cover both the `0.1.x-rc` and `0.2.0-rc` lines (`@deepseek-ai/dsh-tools: ^0.1.0-rc.6 || ^0.2.0-rc.1`), so DSH's startup compatibility gate no longer refuses the plugin on a 0.2.x runtime — the old `^0.1.0-rc.6` range capped at `<0.2.0`, and the gate skips the whole bundle when a `@deepseek-ai/dsh*` peer excludes the running version. The client manifest also now names `@deepseek-ai/dsh-client-ui-renderer` (the client row that actually provides the `slots` service) instead of `@deepseek-ai/dsh-client-runtime`, a package that does not exist.
 
 ## Roadmap
 
@@ -74,15 +79,19 @@ The trajectory is toward a full **agent computational workspace**, not more Note
 - **Checkpoint / rollback** — recover not just code but runtime state.
 - **Remote / SLURM kernel** — run the kernel server-side / on a job while the agent drives it through the same interface.
 
+## Compatibility
+
+Supported DSH runtime lines: `0.1.x-rc` and `0.2.0-rc`, verified against `0.1.7-rc.2` and `0.2.0-rc.2` (the plugin declares `@deepseek-ai/dsh-tools: ^0.1.0-rc.6 || ^0.2.0-rc.1`). DSH refuses to boot a plugin whose `@deepseek-ai/dsh*` peer ranges exclude the running version and skips the whole bundle — on an untested newer line, grant an exact-version exemption (`dsh plugin allow-version`, or the plugin manager) instead of forcing it.
+
 ## Install
 
 ```bash
-dsh plugin --profile web add @beihaizb/dsh-notebook@0.2.4
+dsh plugin --profile web add @beihaizb/dsh-notebook@0.3.0
 ```
 
 Then restart `dsh web`. A **Notebook** tab appears at the top of the session.
 
-> **Note on version pinning**: if you install shortly after a release, pnpm's supply-chain policy (`minimumReleaseAge`) may skip the just-published version and install an older one instead. Pin the version explicitly as above (`@beihaizb/dsh-notebook@0.2.4`), or use `@beihaizb/dsh-notebook@latest` once the release is older than the policy window.
+> **Note on version pinning**: if you install shortly after a release, pnpm's supply-chain policy (`minimumReleaseAge`) may skip the just-published version and install an older one instead. Pin the version explicitly as above (`@beihaizb/dsh-notebook@0.3.0`), or use `@beihaizb/dsh-notebook@latest` once the release is older than the policy window.
 
 ### Kernel selection
 
