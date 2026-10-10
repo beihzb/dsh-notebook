@@ -67,6 +67,7 @@
 - **全新会话也能进 Notebook（v0.3.0）**：会话空白时 DSH 不渲染 `conversation.view` slot，所以此前必须先发一句话才能看到 Notebook 标签。现在空白会话的输入框上方会出现「📓 在本会话打开 Notebook」入口，点击即激活本视图并让常规视图标签栏出现（随后宿主会记住该会话的选择）。
 - **切换视图不再丢滚动位置（v0.3.0）**：宿主同一时刻只渲染一个视图，切到「对话」会卸载 notebook 并把位置重置到顶部。现在滚动偏移与每个 cell 的展开/折叠选择都按会话记忆，切回来自动恢复。
 - **支持 DSH 0.2.0（v0.3.0）**：`peerDependencies` 现在同时覆盖 `0.1.x-rc` 与 `0.2.0-rc` 两条线（`@deepseek-ai/dsh-tools: ^0.1.0-rc.6 || ^0.2.0-rc.1`），DSH 启动期的兼容性门禁不再拒绝本插件——旧的 `^0.1.0-rc.6` 上界是 `<0.2.0`，而只要有 `@deepseek-ai/dsh*` peer 不满足当前运行版本，门禁会**跳过整个 bundle**。client 清单里也改为指向真正提供 `slots` 服务的 client row `@deepseek-ai/dsh-client-ui-renderer`，不再引用根本不存在的 `@deepseek-ai/dsh-client-runtime`。
+- **默认内核跟随本会话（v0.3.1）**：默认内核现在读取**当前会话**的 `dsh-envsel` 选择。此前它取的是存储文件里"最后一个"选择，于是 notebook 可能落到某个不相干会话挑的环境上；而被派出的子代理因为各自拥有独立会话，根本查不到任何选择。现在自身没有选择的会话会继承它向上最近的那个有选择的会话。
 
 ## Roadmap
 
@@ -86,16 +87,16 @@
 ## 安装
 
 ```bash
-dsh plugin --profile web add @beihaizb/dsh-notebook@0.3.0
+dsh plugin --profile web add @beihaizb/dsh-notebook@0.3.1
 ```
 
 然后重启 `dsh web`。会话顶部会出现 **Notebook** 标签。
 
-> **版本锁定说明**：如果刚发布不久就安装，pnpm 的供应链策略（`minimumReleaseAge`）可能跳过刚发布的版本、自动装到旧版。遇到这种情况请像上面那样显式指定版本号（`@beihaizb/dsh-notebook@0.3.0`），或等发布超过策略窗口后用 `@beihaizb/dsh-notebook@latest`。
+> **版本锁定说明**：如果刚发布不久就安装，pnpm 的供应链策略（`minimumReleaseAge`）可能跳过刚发布的版本、自动装到旧版。遇到这种情况请像上面那样显式指定版本号（`@beihaizb/dsh-notebook@0.3.1`），或等发布超过策略窗口后用 `@beihaizb/dsh-notebook@latest`。
 
 ### 内核选择
 
-- **`dsh-envsel` 是可选依赖。** 装了环境选择器时，插件读取它的选择（`~/.dsh/envsel-state.json`），用你在会话里选的 conda 环境作为默认内核。
+- **`dsh-envsel` 是可选依赖。** 装了环境选择器时，插件读取它的选择（`$DSH_HOME` 下的存储，即 `~/.dsh/envsel-state.json`），用你在**本会话**选的 conda 环境作为默认内核。自身没有选择的会话（例如被派出的子代理）会继承它向上最近的那个有选择的会话，因此被委托的 notebook 工作会落在委托它的那个会话所用的环境里。
 
   ```bash
   dsh plugin --profile web add @beihaizb/dsh-envsel
@@ -103,7 +104,7 @@ dsh plugin --profile web add @beihaizb/dsh-notebook@0.3.0
 
   （源码：[github.com/beihzb/dsh-envsel](https://github.com/beihzb/dsh-envsel)）
 
-- **没装 `dsh-envsel`** 时，回退到第一个发现的有 `ipykernel` 的 conda 环境。
+- **没装 `dsh-envsel`** 时，回退到第一个发现的有 `ipykernel` 的 conda 环境。读取存储时会先校验其版本戳，因此未来换了格式的 `envsel` 状态会被忽略，而不是被误读。
 - **随时可切换。** 用工具栏下拉框切换任意其他 conda 环境。
 
 所选环境需要 `ipykernel`、`jupyter_client`、`nbformat`。缺任何一个时，插件会给出友好的精确安装命令，而不是静默失败。

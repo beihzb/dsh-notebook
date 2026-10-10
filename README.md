@@ -67,6 +67,7 @@ Because the kernel is persistent, the agent is operating on stateful runtime sta
 - **Notebook is reachable in a brand-new session (v0.3.0)**: DSH omits the `conversation.view` slot while a session is blank, so the Notebook tab used to require sending a message first. A "📓 Open Notebook in this session" entry now appears above the composer in a blank session; it activates this View target, which reveals the normal View tabs (and the host then remembers your choice for that session).
 - **Scroll position survives View switches (v0.3.0)**: the shell renders one View at a time, so switching to 对话 used to unmount the notebook and reset it to the top. The scroll offset and each cell's folded/expanded choice are now remembered per session and restored when you come back.
 - **DSH 0.2.0 support (v0.3.0)**: `peerDependencies` now cover both the `0.1.x-rc` and `0.2.0-rc` lines (`@deepseek-ai/dsh-tools: ^0.1.0-rc.6 || ^0.2.0-rc.1`), so DSH's startup compatibility gate no longer refuses the plugin on a 0.2.x runtime — the old `^0.1.0-rc.6` range capped at `<0.2.0`, and the gate skips the whole bundle when a `@deepseek-ai/dsh*` peer excludes the running version. The client manifest also now names `@deepseek-ai/dsh-client-ui-renderer` (the client row that actually provides the `slots` service) instead of `@deepseek-ai/dsh-client-runtime`, a package that does not exist.
+- **Session-aware kernel default (v0.3.1)**: the default kernel follows the **current** session's `dsh-envsel` selection. Before this, the plugin took whichever selection happened to be stored last in the file, so a notebook could land in an environment an unrelated session had picked; and every delegated subagent found nothing at all, because a subagent runs in its own session. A session with no selection of its own now inherits the nearest selecting session it descends from.
 
 ## Roadmap
 
@@ -86,16 +87,16 @@ Supported DSH runtime lines: `0.1.x-rc` and `0.2.0-rc`, verified against `0.1.7-
 ## Install
 
 ```bash
-dsh plugin --profile web add @beihaizb/dsh-notebook@0.3.0
+dsh plugin --profile web add @beihaizb/dsh-notebook@0.3.1
 ```
 
 Then restart `dsh web`. A **Notebook** tab appears at the top of the session.
 
-> **Note on version pinning**: if you install shortly after a release, pnpm's supply-chain policy (`minimumReleaseAge`) may skip the just-published version and install an older one instead. Pin the version explicitly as above (`@beihaizb/dsh-notebook@0.3.0`), or use `@beihaizb/dsh-notebook@latest` once the release is older than the policy window.
+> **Note on version pinning**: if you install shortly after a release, pnpm's supply-chain policy (`minimumReleaseAge`) may skip the just-published version and install an older one instead. Pin the version explicitly as above (`@beihaizb/dsh-notebook@0.3.1`), or use `@beihaizb/dsh-notebook@latest` once the release is older than the policy window.
 
 ### Kernel selection
 
-- **`dsh-envsel` is an optional dependency.** With the environment picker installed, the plugin reads its selection (`~/.dsh/envsel-state.json`) and uses the conda environment you picked for the session as the default kernel. Install:
+- **`dsh-envsel` is an optional dependency.** With the environment picker installed, the plugin reads its selection (the store under `$DSH_HOME`, i.e. `~/.dsh/envsel-state.json`) and uses the conda environment you picked **for the session** as the default kernel. A session with no selection of its own — a delegated subagent, for example — inherits the nearest selecting session it descends from, so delegated notebook work lands in the same environment as the session that delegated it. Install:
 
   ```bash
   dsh plugin --profile web add @beihaizb/dsh-envsel
@@ -103,7 +104,7 @@ Then restart `dsh web`. A **Notebook** tab appears at the top of the session.
 
   (Source: [github.com/beihzb/dsh-envsel](https://github.com/beihzb/dsh-envsel))
 
-- **Without `dsh-envsel`**, the plugin falls back to the first discovered conda environment that has `ipykernel` installed.
+- **Without `dsh-envsel`**, the plugin falls back to the first discovered conda environment that has `ipykernel` installed. The store is read with its own version stamp checked, so a future `envsel` state format is ignored rather than misread.
 - **You are never locked in.** Switch kernels from the toolbar dropdown at any time.
 
 The selected environment needs `ipykernel`, `jupyter_client`, and `nbformat`. If any is missing, the plugin shows a friendly error with the exact install command.
