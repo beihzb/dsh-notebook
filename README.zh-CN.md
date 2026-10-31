@@ -31,7 +31,7 @@
 
 ## 功能（已实现）
 
-- **真正的持久内核**：`ipykernel` + `jupyter_client` sidecar，变量跨 cell 保持。
+- **真正的持久内核**：`ipykernel` + `jupyter_client` sidecar，变量跨 cell 保持。**R 内核**（`IRkernel`）同样支持，在同一个下拉框里选。
 - **Agent 工具**：读取、编辑、运行、检查 cell（`nb_get` / `nb_edit_cell` / `nb_run_cell` …），结构化访问输出与 traceback。
 - **Agent 运行时自省**：`nb_context`、`nb_list_vars`、`nb_inspect_object` 暴露活内核变量和压缩后的 notebook 状态；pandas `DataFrame` 会返回 shape / dtype / 缺失值 / head / summary 等元信息。
 - **安全 AI 修改闭环**：更完整的逐 cell 版本快照，配合 `nb_cell_history`、`nb_revert_cell`、`nb_error_context`、`nb_edit_and_run_cell` 支持可审计的修错并重跑流程。
@@ -47,11 +47,11 @@
 - **内核活跃指示**：状态栏显示当前会话内核是否活跃，多会话同时开内核时提醒注意内存/资源。
 - **孤儿进程自动清理**：dsh web 被强杀时，Python sidecar 检测到父进程死亡后自动关闭 ipykernel，不留孤儿进程（跨平台：POSIX 用 getppid，Windows 用 OpenProcess）。
 - **中英双语界面**：整个界面默认英文，工具栏一键切换中文，选择持久化保存。
-- **大小核 CPU 提示**：在混合架构（P+E 核）机器上，一次性（会话级）提示如何把 Python 进程固定到性能核（Windows 任务管理器 / 活动监视器 / `taskset`），并附一键复制的 `psutil` 片段；可关闭不再提示。
+- **大小核 CPU 提示**：在混合架构（P+E 核）机器上，提示如何把 Python 进程固定到性能核（Windows 任务管理器 / 活动监视器 / `taskset`），并附一键复制的 `psutil` 片段。它不再"关掉就永久消失"：工具栏的「⚡ 大小核」按钮可随时重新打开（只关闭"自动弹出"，不关闭入口）。
 - **Jedi 内核补全**（`df.` / `plt.` / 变量名；Tab 接受；悬停看 docstring）。
 - **每 cell AI 修改意见**（版本栈在 `cell.metadata.dsh`）。
-- **标准 `.ipynb`** 保存 / 读取，自动保存 + 未保存提醒。
-- **内核选择**：从 conda 环境列表选内核；缺 ipykernel 时给友好安装提示。
+- **标准 `.ipynb`** 保存 / 读取，自动保存 + 未保存提醒；不需要 `nbformat`，未知字段也不会在往返中丢失。
+- **内核选择**：conda 环境 **和 R 内核**都能选；缺 `ipykernel` / `jupyter_client` / `IRkernel` 时给友好安装提示。
 - **兼容 scoped 安装**：bundle 现在在 host 补丁（`cordis.patch.yml`）和 client 加载器里都注册为 `@beihaizb/dsh-notebook`，`dsh plugin add @beihaizb/dsh-notebook` 可直接加载（此前补丁名不带 scope，无法对上 npm 的 scoped 包名）。
 - **「交给 AI」更可靠**：修复了一个回归（局部变量遮蔽 i18n 翻译函数），此前提交的意见会在发送前被静默丢弃——现在 cell 代码和你的请求一定能送达 agent。
 - **编辑器跟随主题**：CodeMirror 编辑器跟随 DSH 深浅主题——深色用 oneDark，浅色用清爽的浅色方案（行号柔和灰），切换主题时实时重绘。
@@ -68,6 +68,10 @@
 - **切换视图不再丢滚动位置（v0.3.0）**：宿主同一时刻只渲染一个视图，切到「对话」会卸载 notebook 并把位置重置到顶部。现在滚动偏移与每个 cell 的展开/折叠选择都按会话记忆，切回来自动恢复。
 - **支持 DSH 0.2.0（v0.3.0）**：`peerDependencies` 现在同时覆盖 `0.1.x-rc` 与 `0.2.0-rc` 两条线（`@deepseek-ai/dsh-tools: ^0.1.0-rc.6 || ^0.2.0-rc.1`），DSH 启动期的兼容性门禁不再拒绝本插件——旧的 `^0.1.0-rc.6` 上界是 `<0.2.0`，而只要有 `@deepseek-ai/dsh*` peer 不满足当前运行版本，门禁会**跳过整个 bundle**。client 清单里也改为指向真正提供 `slots` 服务的 client row `@deepseek-ai/dsh-client-ui-renderer`，不再引用根本不存在的 `@deepseek-ai/dsh-client-runtime`。
 - **默认内核跟随本会话（v0.3.1）**：默认内核现在读取**当前会话**的 `dsh-envsel` 选择。此前它取的是存储文件里"最后一个"选择，于是 notebook 可能落到某个不相干会话挑的环境上；而被派出的子代理因为各自拥有独立会话，根本查不到任何选择。现在自身没有选择的会话会继承它向上最近的那个有选择的会话。
+- **支持 R 内核（v0.4.0）**：内核下拉框现在会列出 R 内核，来源与 Jupyter 一致——用户数据目录里的 kernelspec、conda 环境自带的 `<env>/share/jupyter/kernels`、以及只在 R library 里装了 `IRkernel` 的 conda 环境（自动合成）。conda 的 R 启动时会把该环境的 DLL 目录塞进 `PATH` 并设好 `R_HOME`，否则直接起二进制会以 `0xC0000135`（找不到 DLL）秒退；kernelspec 里 `argv[0]` 只写 `"R"` 的情况会解析成绝对路径，因此在未激活环境时也能用。`nb_list_vars` / `nb_inspect_object` 有对应的 R 实现（`ls`/`class`/`deparse`，`data.frame` 额外给行数/列数/列类型），保存时写入真实的 `kernelspec.language`（`r` 或 `python`）。
+- **不再需要 `nbformat`（v0.4.0）**：`.ipynb` 的读写改用标准库完成。此前 sidecar 在打开/保存 notebook 时会 `import nbformat`，于是一个有 `ipykernel` + `jupyter_client` 却没有 `nbformat` 的 conda 环境会直接报 `Operation failed: No module named 'nbformat'`——而精简环境或纯 R 环境根本装不了它。现在写出的字节与 `nbformat.write()` 完全一致（缩进/排序/CRLF/拆行规则全部对齐），用 Jupyter 打开再保存不会在 git 里炸开 diff。
+- **notebook 往返无损（v0.4.0）**：插件不认识的东西一律原样保留——markdown 的 `attachments`（粘贴的图片）、每个 output 的 `metadata`（widget 视图尺寸）、全局 `metadata.widgets` 状态、第三方自定义键，保存时不会被吞掉。`nbformat` **3** 的老 notebook（`worksheets`/`input`/`prompt_number`/`png` 别名）会在读取时升级到 v4，而不是被读成空 notebook、再在下次保存时把文件清空；4.0–4.4 的文件按 `nbformat.read` 的行为补齐 cell id。
+- **大小核提示可以重新打开（v0.4.0）**：以前点「知道了，不再提示」后整个浏览器会话都没有入口。现在 CPU 探测结果会留在会话里，工具栏的「⚡ 大小核」按钮可重新打开同一个面板；被关掉的只是**自动弹出**。
 
 ## Roadmap
 
@@ -87,12 +91,12 @@
 ## 安装
 
 ```bash
-dsh plugin --profile web add @beihaizb/dsh-notebook@0.3.1
+dsh plugin --profile web add @beihaizb/dsh-notebook@0.4.0
 ```
 
 然后重启 `dsh web`。会话顶部会出现 **Notebook** 标签。
 
-> **版本锁定说明**：如果刚发布不久就安装，pnpm 的供应链策略（`minimumReleaseAge`）可能跳过刚发布的版本、自动装到旧版。遇到这种情况请像上面那样显式指定版本号（`@beihaizb/dsh-notebook@0.3.1`），或等发布超过策略窗口后用 `@beihaizb/dsh-notebook@latest`。
+> **版本锁定说明**：如果刚发布不久就安装，pnpm 的供应链策略（`minimumReleaseAge`）可能跳过刚发布的版本、自动装到旧版。遇到这种情况请像上面那样显式指定版本号（`@beihaizb/dsh-notebook@0.4.0`），或等发布超过策略窗口后用 `@beihaizb/dsh-notebook@latest`。
 
 ### 内核选择
 
@@ -105,9 +109,20 @@ dsh plugin --profile web add @beihaizb/dsh-notebook@0.3.1
   （源码：[github.com/beihzb/dsh-envsel](https://github.com/beihzb/dsh-envsel)）
 
 - **没装 `dsh-envsel`** 时，回退到第一个发现的有 `ipykernel` 的 conda 环境。读取存储时会先校验其版本戳，因此未来换了格式的 `envsel` 状态会被忽略，而不是被误读。
-- **随时可切换。** 用工具栏下拉框切换任意其他 conda 环境。
+- **随时可切换。** 用工具栏下拉框切换任意其他环境（Python 或 R）。
 
-所选环境需要 `ipykernel`、`jupyter_client`、`nbformat`。缺任何一个时，插件会给出友好的精确安装命令，而不是静默失败。
+### 内核依赖
+
+| 内核 | 需要 |
+|---|---|
+| Python | `ipykernel` **和** `jupyter_client`——前者跑内核，后者跑与它通信的 sidecar |
+| R | 该 R 的 library 里有 `IRkernel`；不需要任何 Python 包（sidecar 借用某个 Python 环境，优先用 `dsh-envsel` 选的 python） |
+
+`nbformat` **不需要**——notebook 文件用标准库读写。
+
+`jupyter_client` 与 `ipykernel` 是真正第三方的协议实现，缺了会给出精确的安装命令，而不是抛原始 `ModuleNotFoundError`；内核下拉框也会把这类环境标记为不可用，避免你选到一个起不来的内核。
+
+**R 内核需要主动选择**：新建 notebook 不会悄悄启动 R。要跑 R notebook 就在下拉框里选 `R · ggtree`、`R · hdWGCNA` 等。下拉框里每个条目都带语言前缀——`py · scRNAv2`、`R · ggtree`——两者不会混淆；`nb_kernel_list` 也返回同样的 `language` 字段（`"python"` / `"r"`）。而一个只有 Python、但顺带装了 R 的 conda 环境（很常见）仍会被 `dsh-envsel` 写进运行时上下文，agent 因此知道两条调用路径。
 
 ## 工具
 

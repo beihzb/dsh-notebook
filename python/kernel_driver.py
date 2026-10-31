@@ -28,6 +28,8 @@ Commands:
 import sys
 import os
 import json
+import hashlib
+import tempfile
 import traceback
 import threading
 import time
@@ -67,38 +69,372 @@ def _log(msg):
 MAX_STREAM_CHARS = 500000
 
 
+# ---------------------------------------------------------------------------
+# .ipynb reading and writing without nbformat
+#
+# nbformat is NOT a dependency of the sidecar: it is absent from many lean
+# conda environments that still ship ipykernel + jupyter_client (and an R
+# environment has no Python packages at all).  Importing it here made
+# "open notebook" fail with ``No module named 'nbformat'`` on exactly those
+# environments.  Everything the file format needs is plain JSON, so the
+# reader/writer below is stdlib only.
+#
+# The output is byte-compatible with what nbformat.write() produces -
+# ``json.dumps(indent=1, sort_keys=True, ensure_ascii=False)`` with multi-line
+# strings stored as a list of lines - so files written here and by Jupyter do
+# not churn in git.
+# ---------------------------------------------------------------------------
+
+IPYNB_FORMAT_VERSION = 4
+IPYNB_FORMAT_MINOR = 5
+
+
+def _split_lines(value):
+    """Render a multi-line string the way nbformat stores it.
+
+    nbformat writes ``"a\\nb\\n"`` as ``["a\\n", "b\\n"]``.  ``splitlines`` with
+    ``keepends`` reproduces that exactly, including the "no trailing newline"
+    case (``"abc"`` -> ``["abc"]``).
+    """
+    if not isinstance(value, str):
+        return value
+    if value == "":
+        return [""]
+    return value.splitlines(keepends=True)
+
+
+def _join_lines(value):
+    """Accept either the string or the list-of-lines form of a multiline field."""
+    if isinstance(value, list):
+        return "".join(str(part) for part in value)
+    if value is None:
+        return ""
+    return value
+
+
+def _split_data(data):
+    """Apply nbformat's line splitting to an output's data bundle.
+
+    nbformat only splits the ``text/*`` mimetypes; base64 payloads such as
+    ``image/png`` stay a single string, so they are left untouched here.
+    """
+    if not isinstance(data, dict):
+        return data
+    return {
+        key: _split_lines(val) if isinstance(val, str) and key.startswith("text/") else val
+        for key, val in data.items()
+    }
+
+
+def _join_data(data):
+    """Inverse of _split_data for an output read back from disk."""
+    if not isinstance(data, dict):
+        return data
+    return {
+        key: _join_lines(val) if isinstance(val, list) and key.startswith("text/") else val
+        for key, val in data.items()
+    }
+
+
+# Cell / output keys this driver understands.  Anything else a real notebook
+# carries (markdown ``attachments``, per-output ``metadata`` such as widget
+# view sizes, notebook-producer extensions) is round-tripped through an
+# ``extras`` dict instead of being dropped.
+CELL_KEYS = {"id", "cell_type", "source", "outputs", "metadata", "execution_count"}
+OUTPUT_KEYS = {
+    "output_type", "name", "text", "data", "metadata",
+    "execution_count", "ename", "evalue", "traceback",
+}
+
+
+def _new_cell_id():
+    """An 8-hex-digit cell id, the shape nbformat 4.5 expects."""
+    return os.urandom(4).hex()
+
+
+def _extras(item, known):
+    return {key: val for key, val in item.items() if key not in known}
+
+
+# --- nbformat 3 support ----------------------------------------------------
+#
+# A v3 notebook has ``worksheets`` instead of ``cells``, ``input`` instead of
+# ``source``, ``prompt_number`` instead of ``execution_count``, and outputs that
+# carry mime payloads as top-level ``png``/``html``/``json`` keys.  Returning an
+# empty cell list for one of those would silently wipe the file on the next
+# save, so v3 documents are upgraded on read (the mapping mirrors
+# nbformat.v4.convert).
+V3_MIME_MAP = {
+    "text": "text/plain",
+    "html": "text/html",
+    "svg": "image/svg+xml",
+    "png": "image/png",
+    "jpeg": "image/jpeg",
+    "latex": "text/latex",
+    "json": "application/json",
+    "javascript": "application/javascript",
+}
+
+
+def _upgrade_v3_output(output):
+    out = dict(output)
+    otype = out.get("output_type")
+    if otype in ("pyout", "display_data"):
+        metadata = out.pop("metadata", None)
+        data = {}
+        for key in list(out):
+            if key in ("output_type", "execution_count", "prompt_number"):
+                continue
+            data[key] = out.pop(key)
+        data = {V3_MIME_MAP.get(key, key): val for key, val in data.items()}
+        if metadata:
+            out["metadata"] = {V3_MIME_MAP.get(key, key): val for key, val in metadata.items()}
+        payload = data.get("application/json")
+        if isinstance(payload, str):
+            try:
+                data["application/json"] = json.loads(payload)
+            except ValueError:
+                pass
+        out["data"] = data
+        if otype == "pyout":
+            out["output_type"] = "execute_result"
+            out["execution_count"] = out.pop("prompt_number", None)
+        else:
+            out.pop("prompt_number", None)
+    elif otype == "pyerr":
+        out["output_type"] = "error"
+    elif otype == "stream":
+        out["name"] = out.pop("stream", "stdout")
+    return out
+
+
+def _upgrade_v3_cell(cell):
+    cell = dict(cell)
+    metadata = dict(cell.get("metadata") or {})
+    kind = cell.get("cell_type")
+    upgraded = {"id": _new_cell_id(), "metadata": metadata}
+    if kind == "code":
+        cell.pop("language", None)
+        if "collapsed" in cell:
+            metadata["collapsed"] = cell.pop("collapsed")
+        upgraded["cell_type"] = "code"
+        upgraded["source"] = _join_lines(cell.pop("input", ""))
+        upgraded["execution_count"] = cell.pop("prompt_number", None)
+        upgraded["outputs"] = [_upgrade_v3_output(o) for o in cell.get("outputs") or []]
+    elif kind == "heading":
+        level = cell.pop("level", 1)
+        single_line = " ".join(_join_lines(cell.get("source", "")).splitlines())
+        upgraded["cell_type"] = "markdown"
+        upgraded["source"] = "%s %s" % ("#" * (level or 1), single_line)
+    elif kind in ("markdown", "raw"):
+        upgraded["cell_type"] = kind
+        upgraded["source"] = _join_lines(cell.get("source", ""))
+    else:
+        # "html" and anything exotic degrade to markdown rather than vanishing.
+        upgraded["cell_type"] = "markdown"
+        upgraded["source"] = _join_lines(cell.get("source", ""))
+    return upgraded
+
+
+def _upgrade_v3(nb):
+    """Flatten a v3 notebook into v4 shape, in place."""
+    metadata = dict(nb.get("metadata") or {})
+    metadata["orig_nbformat"] = nb.pop("orig_nbformat", 3) or 3
+    metadata["orig_nbformat_minor"] = nb.pop("orig_nbformat_minor", 0) or 0
+    metadata.pop("name", None)
+    metadata.pop("signature", None)
+    cells = []
+    for worksheet in nb.pop("worksheets", []) or []:
+        for cell in worksheet.get("cells") or []:
+            cells.append(_upgrade_v3_cell(cell))
+    nb["cells"] = cells
+    nb["metadata"] = metadata
+    nb["nbformat"] = IPYNB_FORMAT_VERSION
+    nb["nbformat_minor"] = IPYNB_FORMAT_MINOR
+    return nb
+
+
+# --- per-language introspection probes ------------------------------------
+#
+# The kernel namespace lives inside the kernel, so listing variables means
+# executing code there.  The snippets below emit a single JSON line that
+# _json_probe parses back.  R has no stdlib JSON, so the escaping is done by
+# hand; results are trimmed before escaping so a large object cannot flood the
+# sidecar's stdio.
+
+_R_ESCAPE = r"""
+  esc <- function(s) {
+    s <- gsub("\\\\", "\\\\\\\\", s)
+    s <- gsub("\"", "\\\\\"", s)
+    s <- gsub("\r", "\\\\r", s)
+    s <- gsub("\n", "\\\\n", s)
+    s <- gsub("\t", "\\\\t", s)
+    s
+  }
+"""
+
+R_LIST_VARS = (
+    r"""
+local({
+"""
+    + _R_ESCAPE
+    + r"""
+  nms <- sort(ls(envir = globalenv()))
+  parts <- character(0)
+  for (n in nms) {
+    if (substr(n, 1, 1) == ".") next
+    v <- tryCatch(get(n, envir = globalenv()), error = function(e) NULL)
+    if (is.function(v) || is.environment(v) || is.null(v)) next
+    r <- tryCatch(paste(utils::head(deparse(v), 3), collapse = " "),
+                  error = function(e) "<unprintable>")
+    parts <- c(parts, sprintf(
+      "{\"name\":\"%s\",\"type\":\"%s\",\"module\":\"\",\"repr\":\"%s\",\"value\":\"%s\"}",
+      esc(n), esc(class(v)[1]), esc(substr(r, 1, 300)), esc(substr(r, 1, 300))))
+  }
+  cat("{\"vars\":[", paste(parts, collapse = ","), "]}")
+})
+"""
+)
+
+R_INSPECT_OBJECT = (
+    r"""
+local({
+"""
+    + _R_ESCAPE
+    + r"""
+  n <- __DSH_NAME__
+  head_out <- c("{\"name\":\"", esc(n), "\",\"found\":false")
+  if (exists(n, envir = globalenv(), inherits = FALSE)) {
+    v <- get(n, envir = globalenv())
+    r <- tryCatch(paste(utils::head(deparse(v), 20), collapse = "\n"),
+                  error = function(e) "<unprintable>")
+    head_out <- c("{\"name\":\"", esc(n), "\",\"found\":true,\"type\":\"",
+                  esc(class(v)[1]), "\",\"module\":\"",
+                  esc(paste(class(v), collapse = ", ")),
+                  "\",\"repr\":\"", esc(substr(r, 1, 1000)), "\"")
+    if (is.data.frame(v)) {
+      cols <- vapply(names(v), function(cn) sprintf("\"%s\":\"%s\"",
+        esc(cn), esc(class(v[[cn]])[1])), character(1))
+      head_out <- c(head_out, ",\"rows\":", nrow(v), ",\"cols\":", ncol(v),
+                    ",\"columns\":{", paste(cols, collapse = ","), "}")
+    } else if (!is.null(dim(v)) && length(dim(v)) > 1) {
+      head_out <- c(head_out, ",\"shape\":[", paste(dim(v), collapse = ","), "]")
+    } else if (is.atomic(v)) {
+      head_out <- c(head_out, ",\"length\":", length(v))
+    }
+  }
+  cat(paste(c(head_out, "}"), collapse = ""))
+})
+"""
+)
+
+
 class KernelDriver:
     def __init__(self):
         self.km = None
         self.kc = None
         self.interpreter = None
         self._exec_count = 0
+        # "python" or "r" - decided from the kernel's own language_info, and
+        # used to pick the introspection snippets that make sense.
+        self.language = "python"
+        self.kernel_name = None
+        self.kernel_info = {}
 
-    def start(self, interpreter=None, cwd=None):
+    def _install_kernel_spec(self, argv, display_name, language):
+        """Write a throwaway kernelspec and expose it through JUPYTER_PATH.
+
+        An R kernel is not a Python kernelspec that happens to point at R: the
+        argv has to be built from the real R binary (a conda kernelspec often
+        just says "R", which only resolves while that env is activated), and
+        some R installs ship no kernelspec at all. Generating one in the temp
+        directory keeps the user's ~/.local/share/jupyter untouched and needs
+        no `jupyter kernelspec install`.
+        """
+        name = "dsh-" + hashlib.sha1(
+            json.dumps([argv, language], ensure_ascii=False).encode("utf-8")
+        ).hexdigest()[:10]
+        root = os.path.join(tempfile.gettempdir(), "dsh-notebook-jupyter")
+        spec_dir = os.path.join(root, "kernels", name)
+        os.makedirs(spec_dir, exist_ok=True)
+        with open(os.path.join(spec_dir, "kernel.json"), "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "argv": list(argv),
+                    "display_name": display_name or name,
+                    "language": language or "python",
+                },
+                handle,
+                ensure_ascii=False,
+            )
+        parts = [root]
+        for entry in (os.environ.get("JUPYTER_PATH") or "").split(os.pathsep):
+            if entry and entry not in parts:
+                parts.append(entry)
+        os.environ["JUPYTER_PATH"] = os.pathsep.join(parts)
+        return name
+
+    def start(self, interpreter=None, cwd=None, kernel_name=None, kernel_argv=None,
+              kernel_display=None, kernel_language=None, kernel_env=None):
         from jupyter_client import KernelManager
 
         self.interpreter = interpreter or sys.executable
+        if kernel_env:
+            for key, value in kernel_env.items():
+                if value is not None:
+                    os.environ[str(key)] = str(value)
         if cwd:
             try:
                 os.chdir(cwd)
             except Exception:
                 pass
-        self.km = KernelManager()
         start_kwargs = {}
         if cwd:
             start_kwargs["cwd"] = cwd
-        try:
+        if kernel_argv:
+            kernel_name = self._install_kernel_spec(
+                kernel_argv, kernel_display, kernel_language or "python"
+            )
+        self.kernel_name = kernel_name
+        if kernel_name:
+            # An explicit kernel (R, or a named kernelspec) must never fall back
+            # to python3 - that would silently run the user's R in a Python
+            # kernel and produce nonsense results instead of an error.
+            self.km = KernelManager(kernel_name=kernel_name)
             self.km.start_kernel(**start_kwargs)
-        except Exception:
-            self.km = KernelManager(kernel_name="python3")
-            self.km.start_kernel(**start_kwargs)
+        else:
+            self.km = KernelManager()
+            try:
+                self.km.start_kernel(**start_kwargs)
+            except Exception:
+                self.km = KernelManager(kernel_name="python3")
+                self.km.start_kernel(**start_kwargs)
         self.kc = self.km.client()
         self.kc.start_channels()
         try:
-            self.kc.wait_for_ready(timeout=30)
+            self.kc.wait_for_ready(timeout=60)
         except Exception:
             pass
-        return {"alive": True, "interpreter": self.interpreter, "cwd": os.getcwd()}
+        self.kernel_info = {}
+        try:
+            reply = self.kc.kernel_info(reply=True, timeout=20)
+            self.kernel_info = reply.get("content") or {}
+        except Exception:
+            pass
+        detected = ((self.kernel_info.get("language_info") or {}).get("name") or "").lower()
+        self.language = detected or (kernel_language or "python").lower()
+        return {
+            "alive": True,
+            "interpreter": self.interpreter,
+            "cwd": os.getcwd(),
+            "language": self.language,
+            "kernel_name": kernel_name,
+            "kernel_info": {
+                "language": self.language,
+                "implementation": (self.kernel_info.get("implementation") or ""),
+                "version": ((self.kernel_info.get("language_info") or {}).get("version") or ""),
+            },
+        }
 
     def _progress_outputs(self, outputs):
         """Compact transient progress payloads; final execute result still returns full outputs."""
@@ -401,7 +737,17 @@ class KernelDriver:
     def get_state(self):
         if not self.kc:
             return {"alive": False}
-        return {"alive": True, "kernel_info": {"interpreter": self.interpreter or sys.executable}}
+        return {
+            "alive": True,
+            "language": self.language,
+            "kernel_name": self.kernel_name,
+            "kernel_info": {
+                "interpreter": self.interpreter or sys.executable,
+                "language": self.language,
+                "implementation": (self.kernel_info.get("implementation") or ""),
+                "version": ((self.kernel_info.get("language_info") or {}).get("version") or ""),
+            },
+        }
 
     def _json_probe(self, code, timeout=10):
         """Execute a short probe in the kernel and parse the last JSON stdout line."""
@@ -424,6 +770,8 @@ class KernelDriver:
         """List variables in the kernel namespace without dumping large values."""
         if not self.kc:
             return {"vars": []}
+        if self.language.startswith("r"):
+            return self._json_probe(R_LIST_VARS, timeout=25) or {"vars": []}
         return self._json_probe(
             r'''
 import json as _dnb_json, types as _dnb_types
@@ -464,6 +812,11 @@ print(_dnb_json.dumps({'vars': _dnb_vars}, ensure_ascii=False, allow_nan=False, 
         name = str(name or "").strip()
         if not name:
             return {"found": False, "error": "name required"}
+        if self.language.startswith("r"):
+            return self._json_probe(
+                R_INSPECT_OBJECT.replace("__DSH_NAME__", json.dumps(name, ensure_ascii=False)),
+                timeout=25,
+            ) or {"name": name, "found": False, "error": "no JSON result"}
         return self._json_probe(
             """
 import json as _dnb_json, inspect as _dnb_inspect
@@ -542,90 +895,158 @@ print(_dnb_json.dumps(_dnb_out, ensure_ascii=False, allow_nan=False, default=str
         ) or {"name": name, "found": False, "error": "no JSON result"}
 
     def load_ipynb(self, path):
-        import nbformat
-        nb = nbformat.read(path, as_version=4)
+        with open(path, "r", encoding="utf-8") as handle:
+            nb = json.load(handle)
+        if not isinstance(nb, dict):
+            raise ValueError("not a notebook document: %s" % path)
+        try:
+            version = int(nb.get("nbformat") or 4)
+        except (TypeError, ValueError):
+            version = 4
+        if version < 4:
+            nb = _upgrade_v3(nb)
+        elif "cells" not in nb and "worksheets" in nb:
+            # Version tag lies but the payload is v3-shaped; upgrade anyway
+            # rather than reporting an empty notebook.
+            nb = _upgrade_v3(nb)
+        if "cells" not in nb:
+            raise ValueError(
+                "not a notebook: %s has neither 'cells' nor 'worksheets'" % path
+            )
         cells = []
-        for cell in nb.cells:
-            c = {
-                "id": cell.get("id", "cell-%d" % len(cells)),
-                "cell_type": cell.cell_type,
-                "source": cell.source,
+        for cell in nb.get("cells") or []:
+            cell_type = cell.get("cell_type") or "code"
+            entry = {
+                "id": cell.get("id") or _new_cell_id(),
+                "cell_type": cell_type,
+                "source": _join_lines(cell.get("source", "")),
                 "outputs": [],
-                "metadata": dict(cell.get("metadata", {})),
+                "metadata": dict(cell.get("metadata") or {}),
                 "execution_count": cell.get("execution_count"),
             }
-            if cell.cell_type == "code":
-                for out in cell.get("outputs", []):
-                    c["outputs"].append(self._nb_output_to_dict(out))
-            cells.append(c)
+            if cell_type == "code":
+                for out in cell.get("outputs") or []:
+                    entry["outputs"].append(self._nb_output_to_dict(out))
+            extra = _extras(cell, CELL_KEYS)
+            if extra:
+                entry["extras"] = extra
+            cells.append(entry)
+        metadata = dict(nb.get("metadata") or {})
+        try:
+            minor = int(nb.get("nbformat_minor", IPYNB_FORMAT_MINOR))
+        except (TypeError, ValueError):
+            minor = IPYNB_FORMAT_MINOR
+        if minor < IPYNB_FORMAT_MINOR:
+            # Same upgrade nbformat.read(as_version=4) performs: a 4.0-4.4
+            # notebook gains stable cell ids and is reported as 4.5.
+            metadata.setdefault("orig_nbformat_minor", minor)
+            minor = IPYNB_FORMAT_MINOR
         return {
             "cells": cells,
-            "metadata": dict(nb.get("metadata", {})),
-            "nbformat": nb.get("nbformat", 4),
-            "nbformat_minor": nb.get("nbformat_minor", 5),
+            "metadata": metadata,
+            "nbformat": IPYNB_FORMAT_VERSION,
+            "nbformat_minor": minor,
         }
 
     def _nb_output_to_dict(self, out):
-        result = {"output_type": out.get("output_type", "")}
-        if out["output_type"] == "stream":
-            result["type"] = "stream"
+        """Project a file output onto the host's output shape, keeping the rest."""
+        otype = out.get("output_type") or "display_data"
+        result = {"type": otype}
+        if otype == "stream":
             result["name"] = out.get("name", "stdout")
-            result["text"] = out.get("text", "")
-        elif out["output_type"] in ("display_data", "execute_result"):
-            result["type"] = out["output_type"]
-            result["data"] = self._serialize_data(out.get("data", {}))
-            result["execution_count"] = out.get("execution_count")
-        elif out["output_type"] == "error":
-            result["type"] = "error"
+            result["text"] = _join_lines(out.get("text", ""))
+            if out.get("metadata"):
+                result["metadata"] = out["metadata"]
+        elif otype in ("display_data", "execute_result", "update_display_data"):
+            result["data"] = _join_data(out.get("data") or {})
+            if "metadata" in out:
+                result["metadata"] = out["metadata"]
+            if otype == "execute_result":
+                result["execution_count"] = out.get("execution_count")
+        elif otype == "error":
             result["error"] = {
                 "ename": out.get("ename", ""),
                 "evalue": out.get("evalue", ""),
-                "traceback": out.get("traceback", []),
+                "traceback": [_join_lines(line) for line in out.get("traceback") or []],
             }
+        extra = _extras(out, OUTPUT_KEYS)
+        if extra:
+            result["extras"] = extra
         return result
 
     def save_ipynb(self, path, cells, metadata=None):
-        import nbformat
-        nb = nbformat.v4.new_notebook()
-        if metadata:
-            nb.metadata = metadata
+        nb = {
+            "cells": [],
+            "metadata": dict(metadata or {}),
+            "nbformat": IPYNB_FORMAT_VERSION,
+            "nbformat_minor": IPYNB_FORMAT_MINOR,
+        }
+        seen_ids = set()
         for c in cells:
-            if c.get("cell_type") == "markdown":
-                cell = nbformat.v4.new_markdown_cell(c.get("source", ""))
+            cell_type = c.get("cell_type") or "code"
+            # Start from whatever this cell carried that we do not model
+            # (markdown attachments, vendor extensions) so saving never strips it.
+            cell = dict(c.get("extras") or {})
+            cell["cell_type"] = cell_type
+            cell["metadata"] = dict(c.get("metadata") or {})
+            cell["source"] = _split_lines(c.get("source", ""))
+            cell_id = c.get("id")
+            if not isinstance(cell_id, str) or not cell_id or cell_id in seen_ids:
+                cell_id = _new_cell_id()
+                while cell_id in seen_ids:
+                    cell_id = _new_cell_id()
+            seen_ids.add(cell_id)
+            cell["id"] = cell_id
+            if cell_type == "code":
+                cell["outputs"] = [self._dict_to_nb_output(o) for o in (c.get("outputs") or [])]
+                cell["execution_count"] = c.get("execution_count")
             else:
-                cell = nbformat.v4.new_code_cell(c.get("source", ""))
-                if c.get("id"):
-                    cell["id"] = c["id"]
-                if c.get("outputs"):
-                    cell["outputs"] = [self._dict_to_nb_output(o) for o in c["outputs"]]
-                    cell["execution_count"] = c.get("execution_count")
-                if c.get("metadata"):
-                    cell["metadata"] = c["metadata"]
-            nb.cells.append(cell)
-        nbformat.write(nb, path)
+                cell.pop("outputs", None)
+                cell.pop("execution_count", None)
+            nb["cells"].append(cell)
+        text = json.dumps(nb, indent=1, sort_keys=True, separators=(",", ": "), ensure_ascii=False) + "\n"
+        # Write through a sibling temp file so a crash mid-write cannot truncate
+        # an existing notebook. os.replace is atomic on the same volume.
+        # No explicit newline: nbformat lets the platform translate "\n", so
+        # matching that keeps our files byte-identical to what Jupyter writes.
+        tmp = path + ".dsh-tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp, path)
         return {"ok": True, "path": path}
 
     def _dict_to_nb_output(self, d):
-        import nbformat
-        otype = d.get("output_type", d.get("type", ""))
-        if d.get("type") == "stream" or otype == "stream":
-            return nbformat.v4.new_output(
-                "stream", name=d.get("name", "stdout"), text=d.get("text", "")
-            )
-        elif d.get("type") in ("display_data", "execute_result") or otype in (
-            "display_data",
-            "execute_result",
-        ):
-            return nbformat.v4.new_output(otype or "display_data", data=d.get("data", {}))
-        elif d.get("type") == "error" or otype == "error":
-            err = d.get("error", {})
-            return nbformat.v4.new_output(
-                "error",
-                ename=err.get("ename", ""),
-                evalue=err.get("evalue", ""),
-                traceback=err.get("traceback", []),
-            )
-        return nbformat.v4.new_output("display_data", data={"text/plain": str(d)})
+        """Build a file output from the host's output shape."""
+        kind = d.get("type") or d.get("output_type") or "display_data"
+        base = dict(d.get("extras") or {})
+        if kind == "stream":
+            base["output_type"] = "stream"
+            base["name"] = d.get("name", "stdout")
+            base["text"] = _split_lines(d.get("text", ""))
+            if "metadata" in d:
+                base["metadata"] = d["metadata"]
+        elif kind in ("display_data", "execute_result", "update_display_data"):
+            if kind == "update_display_data":
+                # Wire-protocol only: a saved notebook may hold stream /
+                # display_data / execute_result / error, so an update collapses
+                # into the display_data it was patching.
+                kind = "display_data"
+            base["output_type"] = kind
+            base["data"] = _split_data(d.get("data") or {})
+            base["metadata"] = d.get("metadata") or {}
+            if kind == "execute_result":
+                base["execution_count"] = d.get("execution_count")
+        elif kind == "error":
+            err = d.get("error") or {}
+            base["output_type"] = "error"
+            base["ename"] = err.get("ename", "")
+            base["evalue"] = err.get("evalue", "")
+            base["traceback"] = [_join_lines(line) for line in err.get("traceback") or []]
+        else:
+            base["output_type"] = "display_data"
+            base["data"] = _split_data(d.get("data") or {"text/plain": str(d)})
+            base["metadata"] = d.get("metadata") or {}
+        return base
 
 
 def _handle(driver, req):
@@ -633,7 +1054,15 @@ def _handle(driver, req):
     cmd = req.get("cmd", "")
     try:
         if cmd == "start":
-            res = driver.start(req.get("interpreter"), req.get("cwd"))
+            res = driver.start(
+                interpreter=req.get("interpreter"),
+                cwd=req.get("cwd"),
+                kernel_name=req.get("kernel_name"),
+                kernel_argv=req.get("kernel_argv"),
+                kernel_display=req.get("kernel_display"),
+                kernel_language=req.get("kernel_language"),
+                kernel_env=req.get("kernel_env"),
+            )
             _send({"id": req_id, "ok": True, **res})
         elif cmd == "execute":
             res = driver.execute(req.get("code", ""), req.get("timeout", 120), req_id=req_id)

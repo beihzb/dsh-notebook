@@ -31,7 +31,7 @@ Because the kernel is persistent, the agent is operating on stateful runtime sta
 
 ## Features (implemented)
 
-- **Real persistent kernel**: `ipykernel` + `jupyter_client` sidecar — variables persist across cells.
+- **Real persistent kernel**: `ipykernel` + `jupyter_client` sidecar — variables persist across cells. **R kernels** (`IRkernel`) are supported too, picked from the same dropdown.
 - **Agent tools** to read, edit, run, and inspect cells (`nb_get`, `nb_edit_cell`, `nb_run_cell`, ...) with structured access to outputs and tracebacks.
 - **Runtime introspection for agents**: `nb_context`, `nb_list_vars`, and `nb_inspect_object` expose live kernel variables and compact notebook state; pandas `DataFrame` objects get shape / dtype / missing-value / head / summary metadata.
 - **Safe AI edit loop**: rich per-cell version snapshots, `nb_cell_history`, `nb_revert_cell`, `nb_error_context`, and `nb_edit_and_run_cell` support auditable repair-and-rerun workflows.
@@ -47,11 +47,11 @@ Because the kernel is persistent, the agent is operating on stateful runtime sta
 - **Kernel activity indicator**: a status bar shows whether the current session's kernel is active and warns when multiple sessions have kernels running (memory / resource awareness).
 - **Parent watchdog**: if `dsh web` is force-killed, the Python sidecar detects parent-process death and auto-shuts-down its `ipykernel` — no orphan processes (cross-platform: `getppid` on POSIX, `OpenProcess` on Windows).
 - **Bilingual UI (EN / 中文)**: the entire interface defaults to English with a one-click language toggle in the toolbar; your choice persists across sessions.
-- **Hybrid-CPU hint**: on big.LITTLE (P+E core) machines a one-time, per-session hint explains how to pin the Python process to performance cores (Windows Task Manager / Activity Monitor / `taskset`), with a copy-ready `psutil` snippet; dismiss it and it won't repeat.
+- **Hybrid-CPU hint**: on big.LITTLE (P+E core) machines a hint explains how to pin the Python process to performance cores (Windows Task Manager / Activity Monitor / `taskset`), with a copy-ready `psutil` snippet. It no longer disappears for good: a toolbar button reopens it after dismissal.
 - **Jedi kernel completion** (`df.` / `plt.` / variable names; Tab to accept; hover for docstrings).
 - **Per-cell AI revision** (version history in `cell.metadata.dsh`).
-- **Standard `.ipynb`** save / load with autosave and unsaved-changes warning.
-- **Kernel picker** over conda environments, with a friendly install hint when `ipykernel` is missing.
+- **Standard `.ipynb`** save / load with autosave and unsaved-changes warning — no `nbformat` needed, and unknown fields survive a round-trip.
+- **Kernel picker** over conda environments **and R kernels**, with a friendly install hint when `ipykernel` / `jupyter_client` / `IRkernel` is missing.
 - **Scoped-install compatible**: the bundle now registers under `@beihaizb/dsh-notebook` in both the host patch (`cordis.patch.yml`) and the client loader, so `dsh plugin add @beihaizb/dsh-notebook` loads out of the box (previously the unscoped patch name failed to resolve against the scoped npm package).
 - **Reliable "Hand to AI"**: fixed a regression (a local variable shadowing the i18n translator) that silently dropped the submitted suggestion before it could be sent — the cell code and your request now always reach the agent.
 - **Theme-aware cell editor**: the CodeMirror editor follows the DSH light/dark theme — oneDark in dark mode, a clean light scheme with soft-gray line numbers in light mode — and re-themes live when you switch.
@@ -68,6 +68,10 @@ Because the kernel is persistent, the agent is operating on stateful runtime sta
 - **Scroll position survives View switches (v0.3.0)**: the shell renders one View at a time, so switching to 对话 used to unmount the notebook and reset it to the top. The scroll offset and each cell's folded/expanded choice are now remembered per session and restored when you come back.
 - **DSH 0.2.0 support (v0.3.0)**: `peerDependencies` now cover both the `0.1.x-rc` and `0.2.0-rc` lines (`@deepseek-ai/dsh-tools: ^0.1.0-rc.6 || ^0.2.0-rc.1`), so DSH's startup compatibility gate no longer refuses the plugin on a 0.2.x runtime — the old `^0.1.0-rc.6` range capped at `<0.2.0`, and the gate skips the whole bundle when a `@deepseek-ai/dsh*` peer excludes the running version. The client manifest also now names `@deepseek-ai/dsh-client-ui-renderer` (the client row that actually provides the `slots` service) instead of `@deepseek-ai/dsh-client-runtime`, a package that does not exist.
 - **Session-aware kernel default (v0.3.1)**: the default kernel follows the **current** session's `dsh-envsel` selection. Before this, the plugin took whichever selection happened to be stored last in the file, so a notebook could land in an environment an unrelated session had picked; and every delegated subagent found nothing at all, because a subagent runs in its own session. A session with no selection of its own now inherits the nearest selecting session it descends from.
+- **R kernels (v0.4.0)**: the kernel picker now lists R kernels, discovered the way Jupyter discovers them — kernelspecs in the user data dir, kernelspecs shipped inside a conda env (`<env>/share/jupyter/kernels`), and conda environments that merely have `IRkernel` installed in their R library (synthesised). A conda R is started with its env's DLL directories on `PATH` and `R_HOME` set, because launching the bare binary dies instantly with `0xC0000135` (DLL not found); a kernelspec whose `argv[0]` is just `"R"` is resolved to the absolute binary so it works without activating the env. `nb_list_vars` / `nb_inspect_object` have R implementations (`ls`/`class`/`deparse`, plus `data.frame` rows/cols/column types), and saving writes the real `kernelspec.language` (`r` or `python`).
+- **`nbformat` is no longer required (v0.4.0)**: reading and writing `.ipynb` is done with the standard library. Previously the sidecar did `import nbformat` when opening or saving a notebook, so a conda env that had `ipykernel` + `jupyter_client` but not `nbformat` failed with `Operation failed: No module named 'nbformat'` — and a lean or R-only environment could never have it at all. Output is byte-identical to `nbformat.write()` (indent/sort/CRLF/line-splitting all match), so files written here and by Jupyter do not churn in git.
+- **Lossless notebook round-trip (v0.4.0)**: anything the plugin does not model — markdown `attachments` (pasted images), per-output `metadata` (widget view sizes), notebook `metadata.widgets` state, vendor keys — is carried through untouched instead of being dropped on save. `nbformat` **3** notebooks (pre-2015 `worksheets`/`input`/`prompt_number`/`png` aliases) are upgraded to v4 on read rather than being read as an empty notebook and wiped on the next save; 4.0–4.4 files gain cell ids the same way `nbformat.read` does.
+- **The hybrid-CPU hint can be reopened (v0.4.0)**: dismissing it used to be permanent for the browser session with no way back. The CPU probe result is now kept for the session and a `⚡ 大小核` / `⚡ Hybrid CPU` toolbar button reopens the same panel; only the *automatic* popup stays dismissed.
 
 ## Roadmap
 
@@ -87,12 +91,12 @@ Supported DSH runtime lines: `0.1.x-rc` and `0.2.0-rc`, verified against `0.1.7-
 ## Install
 
 ```bash
-dsh plugin --profile web add @beihaizb/dsh-notebook@0.3.1
+dsh plugin --profile web add @beihaizb/dsh-notebook@0.4.0
 ```
 
 Then restart `dsh web`. A **Notebook** tab appears at the top of the session.
 
-> **Note on version pinning**: if you install shortly after a release, pnpm's supply-chain policy (`minimumReleaseAge`) may skip the just-published version and install an older one instead. Pin the version explicitly as above (`@beihaizb/dsh-notebook@0.3.1`), or use `@beihaizb/dsh-notebook@latest` once the release is older than the policy window.
+> **Note on version pinning**: if you install shortly after a release, pnpm's supply-chain policy (`minimumReleaseAge`) may skip the just-published version and install an older one instead. Pin the version explicitly as above (`@beihaizb/dsh-notebook@0.4.0`), or use `@beihaizb/dsh-notebook@latest` once the release is older than the policy window.
 
 ### Kernel selection
 
@@ -107,7 +111,18 @@ Then restart `dsh web`. A **Notebook** tab appears at the top of the session.
 - **Without `dsh-envsel`**, the plugin falls back to the first discovered conda environment that has `ipykernel` installed. The store is read with its own version stamp checked, so a future `envsel` state format is ignored rather than misread.
 - **You are never locked in.** Switch kernels from the toolbar dropdown at any time.
 
-The selected environment needs `ipykernel`, `jupyter_client`, and `nbformat`. If any is missing, the plugin shows a friendly error with the exact install command.
+### Kernel requirements
+
+| Kernel | Needs |
+|---|---|
+| Python | `ipykernel` **and** `jupyter_client` — the first runs the kernel, the second runs the sidecar that talks to it |
+| R | `IRkernel` in that R's library; nothing Python-side (the sidecar is borrowed from a Python env, preferring your `dsh-envsel` python) |
+
+`nbformat` is **not** required — notebook files are read and written with the standard library.
+
+`jupyter_client` and `ipykernel` are genuinely third-party protocol implementations, so a missing one is reported with the exact install command instead of a raw `ModuleNotFoundError`; the kernel dropdown also marks such environments as unavailable rather than letting you pick a kernel that cannot start.
+
+**R kernels are opt-in**: opening a fresh notebook never silently starts R. Use the kernel dropdown (`R · ggtree`, `R · hdWGCNA`, …) for an R notebook. Every entry is labelled with its language — `py · scRNAv2`, `R · ggtree` — so the two are never confused, and `nb_kernel_list` reports the same `language` field (`"python"` / `"r"`). An environment that only has a Python interpreter but additionally ships R (very common in conda) is still reported in the runtime context by `dsh-envsel`, so the agent knows both invocations.
 
 ## Tools
 
