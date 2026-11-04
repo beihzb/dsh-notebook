@@ -72,6 +72,10 @@
 - **不再需要 `nbformat`（v0.4.0）**：`.ipynb` 的读写改用标准库完成。此前 sidecar 在打开/保存 notebook 时会 `import nbformat`，于是一个有 `ipykernel` + `jupyter_client` 却没有 `nbformat` 的 conda 环境会直接报 `Operation failed: No module named 'nbformat'`——而精简环境或纯 R 环境根本装不了它。现在写出的字节与 `nbformat.write()` 完全一致（缩进/排序/CRLF/拆行规则全部对齐），用 Jupyter 打开再保存不会在 git 里炸开 diff。
 - **notebook 往返无损（v0.4.0）**：插件不认识的东西一律原样保留——markdown 的 `attachments`（粘贴的图片）、每个 output 的 `metadata`（widget 视图尺寸）、全局 `metadata.widgets` 状态、第三方自定义键，保存时不会被吞掉。`nbformat` **3** 的老 notebook（`worksheets`/`input`/`prompt_number`/`png` 别名）会在读取时升级到 v4，而不是被读成空 notebook、再在下次保存时把文件清空；4.0–4.4 的文件按 `nbformat.read` 的行为补齐 cell id。
 - **大小核提示可以重新打开（v0.4.0）**：以前点「知道了，不再提示」后整个浏览器会话都没有入口。现在 CPU 探测结果会留在会话里，工具栏的「⚡ 大小核」按钮可重新打开同一个面板；被关掉的只是**自动弹出**。
+- **cwd 同步不再杀内核（v0.4.1）**：新挂载的 notebook 视图会用「杀掉 sidecar + 重启内核」的方式同步会话 cwd——这会丢掉所有变量、打断正在运行的 cell，而且当会话状态是用过时的 `process.cwd()` 创建时会**无故触发**。现在新会话从 `SessionHeader.cwd` 初始化，cwd 同步与 `nb_set_cwd` 都改为**原地切换目录**（排在正在跑的 cell 之后，因此不会打断它）。致谢：[#6](https://github.com/beihzb/dsh-notebook/pull/6)。
+- **`/nb` 路由加了鉴权与请求体上限（v0.4.1）**：notebook 的 HTTP 路由现在先向 `connection` 服务要一个拒绝判定——也就是平台挡在 `/api` 前面的同一套 Host/Origin + 登录 Cookie 围栏——同时请求体上限 32 MB。此前任意本地进程、或任意网站通过跨站表单 POST，都能驱动内核执行任意 Python。致谢：[#3](https://github.com/beihzb/dsh-notebook/pull/3)。
+- **不再把 Promise 漏进工具输出（v0.4.1）**：正在运行的 run Promise 以前挂在 cell 对象上，于是 cell 处于排队/运行中时，每次快照（也就包括 `nb_get`、`nb_edit_cell`、`nb_run_cell`）都携带一个活的 Promise。现在任务放在旁挂 Map 里，快照保证可 JSON 序列化。致谢：[#5](https://github.com/beihzb/dsh-notebook/pull/5)。
+- **服务器上不再误报大小核（v0.4.1）**：Linux 上"用 `cpu MHz` 最大值−最小值 > 300 判混合架构"的兜底逻辑，对任何支持调频的 EPYC/Xeon 都会误报——空闲核降频、忙碌核睿频，差值自然超过 300。现在只认显式的 per-core `core_type` 标记。致谢：[#4](https://github.com/beihzb/dsh-notebook/pull/4)。
 
 ## Roadmap
 
@@ -91,12 +95,12 @@
 ## 安装
 
 ```bash
-dsh plugin --profile web add @beihaizb/dsh-notebook@0.4.0
+dsh plugin --profile web add @beihaizb/dsh-notebook@0.4.1
 ```
 
 然后重启 `dsh web`。会话顶部会出现 **Notebook** 标签。
 
-> **版本锁定说明**：如果刚发布不久就安装，pnpm 的供应链策略（`minimumReleaseAge`）可能跳过刚发布的版本、自动装到旧版。遇到这种情况请像上面那样显式指定版本号（`@beihaizb/dsh-notebook@0.4.0`），或等发布超过策略窗口后用 `@beihaizb/dsh-notebook@latest`。
+> **版本锁定说明**：如果刚发布不久就安装，pnpm 的供应链策略（`minimumReleaseAge`）可能跳过刚发布的版本、自动装到旧版。遇到这种情况请像上面那样显式指定版本号（`@beihaizb/dsh-notebook@0.4.1`），或等发布超过策略窗口后用 `@beihaizb/dsh-notebook@latest`。
 
 ### 内核选择
 

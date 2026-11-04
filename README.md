@@ -72,6 +72,10 @@ Because the kernel is persistent, the agent is operating on stateful runtime sta
 - **`nbformat` is no longer required (v0.4.0)**: reading and writing `.ipynb` is done with the standard library. Previously the sidecar did `import nbformat` when opening or saving a notebook, so a conda env that had `ipykernel` + `jupyter_client` but not `nbformat` failed with `Operation failed: No module named 'nbformat'` — and a lean or R-only environment could never have it at all. Output is byte-identical to `nbformat.write()` (indent/sort/CRLF/line-splitting all match), so files written here and by Jupyter do not churn in git.
 - **Lossless notebook round-trip (v0.4.0)**: anything the plugin does not model — markdown `attachments` (pasted images), per-output `metadata` (widget view sizes), notebook `metadata.widgets` state, vendor keys — is carried through untouched instead of being dropped on save. `nbformat` **3** notebooks (pre-2015 `worksheets`/`input`/`prompt_number`/`png` aliases) are upgraded to v4 on read rather than being read as an empty notebook and wiped on the next save; 4.0–4.4 files gain cell ids the same way `nbformat.read` does.
 - **The hybrid-CPU hint can be reopened (v0.4.0)**: dismissing it used to be permanent for the browser session with no way back. The CPU probe result is now kept for the session and a `⚡ 大小核` / `⚡ Hybrid CPU` toolbar button reopens the same panel; only the *automatic* popup stays dismissed.
+- **Session cwd sync no longer kills the kernel (v0.4.1)**: a freshly mounted notebook view synced the session's cwd by killing the sidecar and restarting the kernel — which discarded every variable and interrupted a running cell, and fired spuriously when the session's state had been created from a stale `process.cwd()`. New sessions are now seeded from `SessionHeader.cwd`, and both the sync and `nb_set_cwd` change the directory **in place** (queued behind any in-flight cell, so it cannot interrupt a run). Credit: [#6](https://github.com/beihzb/dsh-notebook/pull/6).
+- **`/nb` routes are authenticated and body-bounded (v0.4.1)**: the notebook's HTTP routes now ask the `connection` service for a rejection first — the same Host/Origin + login-cookie fence the platform puts in front of `/api` — and request bodies are capped at 32 MB. Before this, any local process, or any website via a cross-origin form POST, could drive the kernel and execute arbitrary Python. Credit: [#3](https://github.com/beihzb/dsh-notebook/pull/3).
+- **No more Promise leak into tool output (v0.4.1)**: the in-flight run Promise used to be stored on the cell object, so every snapshot (and therefore `nb_get`, `nb_edit_cell`, `nb_run_cell`) carried a live Promise while a cell was queued or running. Jobs now live in a side map and snapshots are guaranteed JSON-serializable. Credit: [#5](https://github.com/beihzb/dsh-notebook/pull/5).
+- **No false hybrid-CPU warning on servers (v0.4.1)**: the Linux fallback that guessed "hybrid" from a `cpu MHz` max−min gap flagged every frequency-scaling EPYC/Xeon part, because an idle core downclocks while a busy sibling boosts. Only an explicit per-core `core_type` marker counts now. Credit: [#4](https://github.com/beihzb/dsh-notebook/pull/4).
 
 ## Roadmap
 
@@ -91,12 +95,12 @@ Supported DSH runtime lines: `0.1.x-rc` and `0.2.0-rc`, verified against `0.1.7-
 ## Install
 
 ```bash
-dsh plugin --profile web add @beihaizb/dsh-notebook@0.4.0
+dsh plugin --profile web add @beihaizb/dsh-notebook@0.4.1
 ```
 
 Then restart `dsh web`. A **Notebook** tab appears at the top of the session.
 
-> **Note on version pinning**: if you install shortly after a release, pnpm's supply-chain policy (`minimumReleaseAge`) may skip the just-published version and install an older one instead. Pin the version explicitly as above (`@beihaizb/dsh-notebook@0.4.0`), or use `@beihaizb/dsh-notebook@latest` once the release is older than the policy window.
+> **Note on version pinning**: if you install shortly after a release, pnpm's supply-chain policy (`minimumReleaseAge`) may skip the just-published version and install an older one instead. Pin the version explicitly as above (`@beihaizb/dsh-notebook@0.4.1`), or use `@beihaizb/dsh-notebook@latest` once the release is older than the policy window.
 
 ### Kernel selection
 
