@@ -29,6 +29,8 @@ import sys
 import os
 import json
 import hashlib
+import signal
+import subprocess
 import tempfile
 import traceback
 import threading
@@ -744,7 +746,49 @@ class KernelDriver:
             return {"ok": True}
         return {"ok": False, "error": "kernel not started"}
 
+    def _kernel_pid(self):
+        """The pid jupyter_client started, when it is still known."""
+        try:
+            process = getattr(self.km, "provisioner", None)
+            process = getattr(process, "process", None)
+            return int(getattr(process, "pid", 0)) or None
+        except Exception:
+            return None
+
+    def _kill_kernel_tree(self, pid):
+        """Kill the kernel AND the processes it launched.
+
+        A conda R kernelspec runs ``R.exe``, which immediately launches
+        ``Rterm.exe`` - the process that actually computes.  ``shutdown_kernel``
+        only signals the pid it spawned, so on Windows the Rterm child survives
+        as an orphan holding the connection file and its memory.  Python kernels
+        have no such child, which is why this never showed up before.
+
+        Must be called while the launcher is still alive: ``taskkill /T`` walks
+        the parent's children, so once R.exe is gone its child is unreachable.
+        """
+        if not pid:
+            return
+        try:
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True, timeout=15,
+                )
+            else:
+                pgid = os.getpgid(pid)
+                if pgid != os.getpgid(0):
+                    os.killpg(pgid, signal.SIGKILL)
+                else:
+                    os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+
     def stop(self):
+        pid = self._kernel_pid()
+        # Tree first: after shutdown_kernel the launcher is gone and taskkill /T
+        # can no longer find the worker it started.
+        self._kill_kernel_tree(pid)
         try:
             if self.kc:
                 self.kc.stop_channels()
