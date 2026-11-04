@@ -33,7 +33,7 @@
 
 - **真正的持久内核**：`ipykernel` + `jupyter_client` sidecar，变量跨 cell 保持。**R 内核**（`IRkernel`）同样支持，在同一个下拉框里选。
 - **Agent 工具**：读取、编辑、运行、检查 cell（`nb_get` / `nb_edit_cell` / `nb_run_cell` …），结构化访问输出与 traceback。
-- **Agent 运行时自省**：`nb_context`、`nb_list_vars`、`nb_inspect_object` 暴露活内核变量和压缩后的 notebook 状态；pandas `DataFrame` 会返回 shape / dtype / 缺失值 / head / summary 等元信息。
+- **Agent 运行时自省（安全版）**：`nb_context`、`nb_list_vars`、`nb_inspect_object` 暴露活内核变量和压缩后的 notebook 状态，但**不再对任意对象调用 `repr()`**。`nb_list_vars` 只返回名字、精确类型和 shape，支持 `pattern` 过滤与 `offset`/`limit` 分页（默认 100 条、最多 200 条，`max_chars` 兜住返回体积）；`nb_inspect_object` 默认只给类型/维度，只有显式 `preview=true` 才对**白名单里的精确类型**（内置容器与标量、NumPy 数组、pandas `DataFrame`/`Series`、scipy 稀疏矩阵、`AnnData` 的 shape/`isbacked`）给出有限行列的预览。未知类型保持“只有类型”，不会展开内容。内核没启动时直接返回 `not_started`（**不会**为看一眼变量就起一个新内核），内核正在跑 cell 时返回 `busy`（**不会**插队），探测超时也不会自动中断你的 cell。
 - **安全 AI 修改闭环**：更完整的逐 cell 版本快照，配合 `nb_cell_history`、`nb_revert_cell`、`nb_error_context`、`nb_edit_and_run_cell` 支持可审计的修错并重跑流程。
 - **VS Code 对齐的 cell UI**：圆形运行控件、`Queued` / `Executing` 状态栏、执行序号。
 - **VS Code 对齐的执行语义**：重启保留已完成输出、中断只停当前 cell、Run All 遇错停止、Clear Outputs / Restart & Clear。
@@ -68,7 +68,7 @@
 - **切换视图不再丢滚动位置（v0.3.0）**：宿主同一时刻只渲染一个视图，切到「对话」会卸载 notebook 并把位置重置到顶部。现在滚动偏移与每个 cell 的展开/折叠选择都按会话记忆，切回来自动恢复。
 - **支持 DSH 0.2.0（v0.3.0）**：`peerDependencies` 现在同时覆盖 `0.1.x-rc` 与 `0.2.0-rc` 两条线（`@deepseek-ai/dsh-tools: ^0.1.0-rc.6 || ^0.2.0-rc.1`），DSH 启动期的兼容性门禁不再拒绝本插件——旧的 `^0.1.0-rc.6` 上界是 `<0.2.0`，而只要有 `@deepseek-ai/dsh*` peer 不满足当前运行版本，门禁会**跳过整个 bundle**。client 清单里也改为指向真正提供 `slots` 服务的 client row `@deepseek-ai/dsh-client-ui-renderer`，不再引用根本不存在的 `@deepseek-ai/dsh-client-runtime`。
 - **默认内核跟随本会话（v0.3.1）**：默认内核现在读取**当前会话**的 `dsh-envsel` 选择。此前它取的是存储文件里"最后一个"选择，于是 notebook 可能落到某个不相干会话挑的环境上；而被派出的子代理因为各自拥有独立会话，根本查不到任何选择。现在自身没有选择的会话会继承它向上最近的那个有选择的会话。
-- **支持 R 内核（v0.4.0）**：内核下拉框现在会列出 R 内核，来源与 Jupyter 一致——用户数据目录里的 kernelspec、conda 环境自带的 `<env>/share/jupyter/kernels`、以及只在 R library 里装了 `IRkernel` 的 conda 环境（自动合成）。conda 的 R 启动时会把该环境的 DLL 目录塞进 `PATH` 并设好 `R_HOME`，否则直接起二进制会以 `0xC0000135`（找不到 DLL）秒退；kernelspec 里 `argv[0]` 只写 `"R"` 的情况会解析成绝对路径，因此在未激活环境时也能用。`nb_list_vars` / `nb_inspect_object` 有对应的 R 实现（`ls`/`class`/`deparse`，`data.frame` 额外给行数/列数/列类型），保存时写入真实的 `kernelspec.language`（`r` 或 `python`）。
+- **支持 R 内核（v0.4.0）**：内核下拉框现在会列出 R 内核，来源与 Jupyter 一致——用户数据目录里的 kernelspec、conda 环境自带的 `<env>/share/jupyter/kernels`、以及只在 R library 里装了 `IRkernel` 的 conda 环境（自动合成）。conda 的 R 启动时会把该环境的 DLL 目录塞进 `PATH` 并设好 `R_HOME`，否则直接起二进制会以 `0xC0000135`（找不到 DLL）秒退；kernelspec 里 `argv[0]` 只写 `"R"` 的情况会解析成绝对路径，因此在未激活环境时也能用。保存时写入真实的 `kernelspec.language`（`r` 或 `python`）。R 侧的变量自省是**保守**的：函数名和分页永远可用，但只有在能安全判定时才会给出类型——`bindingIsActive()` 用来跳过 active binding；`delayedAssign` 建立的 promise 在 base R 里没有受支持的非强制求值判定方式，因此一律不类型化、不预览（避免探测本身触发用户代码）。如果该 R 会话已经加载了 `rlang`，就用它的 lazy-binding 谓词打开类型化与有限预览；插件**不会**自己 library 任何包。
 - **不再需要 `nbformat`（v0.4.0）**：`.ipynb` 的读写改用标准库完成。此前 sidecar 在打开/保存 notebook 时会 `import nbformat`，于是一个有 `ipykernel` + `jupyter_client` 却没有 `nbformat` 的 conda 环境会直接报 `Operation failed: No module named 'nbformat'`——而精简环境或纯 R 环境根本装不了它。现在写出的字节与 `nbformat.write()` 完全一致（缩进/排序/CRLF/拆行规则全部对齐），用 Jupyter 打开再保存不会在 git 里炸开 diff。
 - **notebook 往返无损（v0.4.0）**：插件不认识的东西一律原样保留——markdown 的 `attachments`（粘贴的图片）、每个 output 的 `metadata`（widget 视图尺寸）、全局 `metadata.widgets` 状态、第三方自定义键，保存时不会被吞掉。`nbformat` **3** 的老 notebook（`worksheets`/`input`/`prompt_number`/`png` 别名）会在读取时升级到 v4，而不是被读成空 notebook、再在下次保存时把文件清空；4.0–4.4 的文件按 `nbformat.read` 的行为补齐 cell id。
 - **大小核提示可以重新打开（v0.4.0）**：以前点「知道了，不再提示」后整个浏览器会话都没有入口。现在 CPU 探测结果会留在会话里，工具栏的「⚡ 大小核」按钮可重新打开同一个面板；被关掉的只是**自动弹出**。
@@ -137,6 +137,22 @@ dsh plugin --profile web add @beihaizb/dsh-notebook@0.4.1
 `nb_run_cell` / `nb_run_all` / `nb_apply_suggestion` /
 `nb_kernel_restart` / `nb_kernel_restart_and_clear` / `nb_kernel_interrupt` /
 `nb_kernel_list` / `nb_kernel_select` / `nb_clear_outputs` / `nb_set_cwd`
+
+### 变量自省的调用契约
+
+```text
+nb_list_vars({ pattern?, offset?, limit?, max_chars? })
+  -> { status, source, kernel_state, vars:[{name,type,module?,shape?}],
+       total, offset, next_offset, truncated }
+
+nb_inspect_object({ name, preview?, rows?, columns?, max_chars? })
+  -> { status, name, found, type, module?, shape?, preview_available,
+       preview?, truncated_columns?, binding? }
+```
+
+- `status` 取值 `ok` / `busy` / `not_started` / `timeout` / `error`；`busy` 与 `not_started` 都不是失败，而是“现在不能看”，调用方应换时机重试。
+- `name` 按**字面量**处理，不会被当表达式求值（传 `__import__('os')` 只会得到 `found:false`）。
+- 默认不返回任何变量内容；`preview=true` 只对白名单类型生效，行/列分别上限 20 / 50，整体还有 `max_chars`（1024–64000）兜底。
 
 ## License
 

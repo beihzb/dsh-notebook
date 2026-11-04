@@ -256,80 +256,140 @@ def _upgrade_v3(nb):
     return nb
 
 
-# --- per-language introspection probes ------------------------------------
-#
-# The kernel namespace lives inside the kernel, so listing variables means
-# executing code there.  The snippets below emit a single JSON line that
-# _json_probe parses back.  R has no stdlib JSON, so the escaping is done by
-# hand; results are trimmed before escaping so a large object cannot flood the
-# sidecar's stdio.
+# --- safe, bounded per-language introspection probes -----------------------
+# Fixed snippets only: names and options are inserted as JSON literals and
+# never parsed as expressions. Base R has no supported non-forcing promise test;
+# the R adapter reads values only when rlang is already loaded and confirms
+# the binding is not lazy. It never loads a package.
+PROBE_DEFAULT_MAX_CHARS = 16000
+PROBE_MIN_MAX_CHARS = 1024
+PROBE_MAX_MAX_CHARS = 64000
+PROBE_DEFAULT_LIST_LIMIT = 100
+PROBE_MAX_LIST_LIMIT = 200
+PROBE_DEFAULT_ROWS = 5
+PROBE_MAX_ROWS = 20
+PROBE_DEFAULT_COLUMNS = 10
+PROBE_MAX_COLUMNS = 50
 
-_R_ESCAPE = r"""
+R_LIST_VARS = r'''local({
   esc <- function(s) {
-    s <- gsub("\\\\", "\\\\\\\\", s)
-    s <- gsub("\"", "\\\\\"", s)
-    s <- gsub("\r", "\\\\r", s)
-    s <- gsub("\n", "\\\\n", s)
-    s <- gsub("\t", "\\\\t", s)
-    s
+    s <- enc2utf8(as.character(s)[1]); ch <- utf8ToInt(s)
+    if (!length(ch)) return('""')
+    parts <- vapply(ch, function(x) {
+      if (x == 34L) return('\\"')
+      if (x == 92L) return('\\\\')
+      if (x < 32L) return(sprintf('\\u%04x', x))
+      intToUtf8(x)
+    }, character(1), USE.NAMES=FALSE)
+    paste0('"', paste0(parts, collapse=''), '"')
   }
-"""
-
-R_LIST_VARS = (
-    r"""
-local({
-"""
-    + _R_ESCAPE
-    + r"""
-  nms <- sort(ls(envir = globalenv()))
-  parts <- character(0)
-  for (n in nms) {
-    if (substr(n, 1, 1) == ".") next
-    v <- tryCatch(get(n, envir = globalenv()), error = function(e) NULL)
-    if (is.function(v) || is.environment(v) || is.null(v)) next
-    r <- tryCatch(paste(utils::head(deparse(v), 3), collapse = " "),
-                  error = function(e) "<unprintable>")
-    parts <- c(parts, sprintf(
-      "{\"name\":\"%s\",\"type\":\"%s\",\"module\":\"\",\"repr\":\"%s\",\"value\":\"%s\"}",
-      esc(n), esc(class(v)[1]), esc(substr(r, 1, 300)), esc(substr(r, 1, 300))))
+  lazy_fn <- NULL
+  if ('rlang' %in% loadedNamespaces()) {
+    ns <- tryCatch(getNamespace('rlang'), error=function(e) NULL)
+    if (!is.null(ns) && exists('env_binding_are_lazy', ns, inherits=FALSE))
+      lazy_fn <- get('env_binding_are_lazy', ns, inherits=FALSE)
   }
-  cat("{\"vars\":[", paste(parts, collapse = ","), "]}")
-})
-"""
-)
+  state <- function(n) {
+    if (bindingIsActive(n, .GlobalEnv)) return('active')
+    if (is.null(lazy_fn)) return('uninspected')
+    if (tryCatch(isTRUE(lazy_fn(.GlobalEnv, n)), error=function(e) TRUE)) 'promise' else 'value'
+  }
+  pattern <- __PATTERN__; offset <- __OFFSET__; limit <- __LIMIT__
+  nms <- sort(ls(envir=.GlobalEnv, all.names=TRUE))
+  nms <- nms[!startsWith(nms, '.')]
+  if (nzchar(pattern)) nms <- nms[vapply(nms, grepl, logical(1), pattern=pattern, ignore.case=TRUE, fixed=TRUE)]
+  total <- length(nms); chosen <- if (offset < total) nms[seq.int(offset+1L, min(total, offset+limit))] else character(0)
+  entries <- character(0)
+  for (n in chosen) {
+    s <- state(n); typ <- if (s == 'active') 'active_binding' else if (s == 'promise') 'promise' else 'unknown'
+    if (s == 'value') {
+      v <- tryCatch(get(n, .GlobalEnv, inherits=FALSE), error=function(e) NULL)
+      cls <- if (is.null(v)) NULL else attr(v, 'class', exact=TRUE)
+      dims <- if (is.null(v)) NULL else attr(v, 'dim', exact=TRUE)
+      if (is.null(v)) typ <- 'NULL'
+      else if (identical(cls, 'data.frame')) typ <- 'data.frame'
+      else if (identical(cls, c('tbl_df','tbl','data.frame'))) typ <- 'tibble'
+      else if (!is.null(dims) && length(dims)==2L && is.null(cls)) typ <- 'matrix'
+      else if (typeof(v) %in% c('logical','integer','double','character','complex','raw','list','closure','environment','builtin','special')) typ <- typeof(v)
+    }
+    entries <- c(entries, paste0('{"name":', esc(substr(n,1L,256L)), ',"type":', esc(typ), ',"module":"","binding":', esc(s), '}'))
+  }
+  nxt <- if (offset + length(chosen) < total) as.character(offset+length(chosen)) else 'null'
+  cat(paste0('{"vars":[', paste(entries,collapse=','), '],"total":',total,',"offset":',offset,
+    ',"next_offset":',nxt,',"truncated":',if (nxt=='null') 'false' else 'true','}'))
+})'''
 
-R_INSPECT_OBJECT = (
-    r"""
-local({
-"""
-    + _R_ESCAPE
-    + r"""
-  n <- __DSH_NAME__
-  head_out <- c("{\"name\":\"", esc(n), "\",\"found\":false")
-  if (exists(n, envir = globalenv(), inherits = FALSE)) {
-    v <- get(n, envir = globalenv())
-    r <- tryCatch(paste(utils::head(deparse(v), 20), collapse = "\n"),
-                  error = function(e) "<unprintable>")
-    head_out <- c("{\"name\":\"", esc(n), "\",\"found\":true,\"type\":\"",
-                  esc(class(v)[1]), "\",\"module\":\"",
-                  esc(paste(class(v), collapse = ", ")),
-                  "\",\"repr\":\"", esc(substr(r, 1, 1000)), "\"")
-    if (is.data.frame(v)) {
-      cols <- vapply(names(v), function(cn) sprintf("\"%s\":\"%s\"",
-        esc(cn), esc(class(v[[cn]])[1])), character(1))
-      head_out <- c(head_out, ",\"rows\":", nrow(v), ",\"cols\":", ncol(v),
-                    ",\"columns\":{", paste(cols, collapse = ","), "}")
-    } else if (!is.null(dim(v)) && length(dim(v)) > 1) {
-      head_out <- c(head_out, ",\"shape\":[", paste(dim(v), collapse = ","), "]")
-    } else if (is.atomic(v)) {
-      head_out <- c(head_out, ",\"length\":", length(v))
+R_INSPECT_OBJECT = r'''local({
+  esc <- function(s) {
+    s <- enc2utf8(as.character(s)[1]); ch <- utf8ToInt(s)
+    if (!length(ch)) return('""')
+    parts <- vapply(ch, function(x) {
+      if (x == 34L) return('\\"')
+      if (x == 92L) return('\\\\')
+      if (x < 32L) return(sprintf('\\u%04x', x))
+      intToUtf8(x)
+    }, character(1), USE.NAMES=FALSE)
+    paste0('"', paste0(parts, collapse=''), '"')
+  }
+  scalar <- function(x) {
+    if (length(x)!=1L) return('null')
+    if (typeof(x)=='character') return(esc(substr(x,1L,128L)))
+    if (typeof(x)=='logical') return(if (is.na(x)) 'null' else if (x) 'true' else 'false')
+    if (typeof(x) %in% c('integer','double')) return(if (is.na(x) || !is.finite(as.double(x))) 'null' else as.character(x))
+    'null'
+  }
+  lazy_fn <- NULL
+  if ('rlang' %in% loadedNamespaces()) {
+    ns <- tryCatch(getNamespace('rlang'), error=function(e) NULL)
+    if (!is.null(ns) && exists('env_binding_are_lazy', ns, inherits=FALSE))
+      lazy_fn <- get('env_binding_are_lazy', ns, inherits=FALSE)
+  }
+  n <- __NAME__; want <- __PREVIEW__; max_rows <- __ROWS__; max_cols <- __COLUMNS__
+  out <- paste0('{"name":',esc(substr(n,1L,256L)),',"found":false')
+  if (exists(n, .GlobalEnv, inherits=FALSE)) {
+    out <- paste0('{"name":',esc(substr(n,1L,256L)),',"found":true')
+    if (bindingIsActive(n,.GlobalEnv)) out <- paste0(out,',"type":"active_binding","binding":"active","preview_available":false,"preview_reason":"active_binding_skipped"')
+    else if (is.null(lazy_fn) || tryCatch(isTRUE(lazy_fn(.GlobalEnv,n)),error=function(e) TRUE))
+      out <- paste0(out,',"type":"unknown","binding":"uninspected","preview_available":false,"preview_reason":"safe_binding_probe_unavailable"')
+    else {
+      v <- tryCatch(get(n,.GlobalEnv,inherits=FALSE),error=function(e) NULL)
+      cls <- if (is.null(v)) NULL else attr(v,'class',exact=TRUE)
+      dims <- if (is.null(v)) NULL else attr(v,'dim',exact=TRUE)
+      typ <- if (is.null(v)) 'NULL' else typeof(v)
+      kind <- if (is.null(v)) 'NULL' else if (identical(cls,'data.frame')) 'data.frame' else if (identical(cls,c('tbl_df','tbl','data.frame'))) 'tibble' else if (!is.null(dims) && length(dims)==2L && is.null(cls)) 'matrix' else typ
+      out <- paste0(out,',"type":',esc(kind),',"binding":"value"')
+      if (kind %in% c('data.frame','tibble')) {
+        cn <- attr(v,'names',exact=TRUE); nrn <- attr(v,'row.names',exact=TRUE)
+        nr <- if (length(nrn)==2L && nrn[1]<0L) -nrn[1] else length(nrn); nc <- length(cn); take <- min(nc,max_cols)
+        shown <- if (take) cn[seq_len(take)] else character(0)
+        out <- paste0(out,',"shape":[',nr,',',nc,'],"columns":[',paste(vapply(shown,esc,character(1)),collapse=','),']')
+        if (want) {
+          cols <- unclass(v); rr <- min(nr,max_rows); row_json <- character(0)
+          if (rr>0L && take>0L) for (ri in seq_len(rr)) {
+            vals <- character(0)
+            for (ci in seq_len(take)) {
+              col <- .subset2(cols,ci); cclass <- attr(col,'class',exact=TRUE)
+              if (is.atomic(col) && is.null(cclass) && typeof(col) %in% c('logical','integer','double','character') && ri<=length(col)) vals <- c(vals,scalar(unclass(col)[ri])) else vals <- c(vals,'null')
+            }
+            row_json <- c(row_json,paste0('[',paste(vals,collapse=','),']'))
+          }
+          out <- paste0(out,',"preview_available":true,"preview":{"columns":[',paste(vapply(shown,esc,character(1)),collapse=','),'],"rows":[',paste(row_json,collapse=','),']},"truncated_columns":',max(0L,nc-take))
+        } else out <- paste0(out,',"preview_available":true,"truncated_columns":',max(0L,nc-take))
+      } else if (identical(kind,'matrix')) {
+        out <- paste0(out,',"shape":[',paste(as.integer(dims),collapse=','),']')
+        if (want) {
+          nr <- min(dims[1],max_rows); nc <- min(dims[2],max_cols); rr <- character(0)
+          if (nr>0L && nc>0L) for (i in seq_len(nr)) rr <- c(rr,paste0('[',paste(vapply(seq_len(nc),function(j) scalar(v[i,j]),character(1)),collapse=','),']'))
+          out <- paste0(out,',"preview_available":true,"preview":{"rows":[',paste(rr,collapse=','),']}')
+        } else out <- paste0(out,',"preview_available":true')
+      } else if (is.null(cls) && is.atomic(v) && typ %in% c('logical','integer','double','character')) {
+        out <- paste0(out,',"length":',length(v),',"preview_available":true')
+        if (want) { count <- min(length(v),max_rows); vals <- if (count) vapply(seq_len(count),function(i) scalar(unclass(v)[i]),character(1)) else character(0); out <- paste0(out,',"preview":{"values":[',paste(vals,collapse=','),'],"truncated":',if(count<length(v))'true'else'false','}') }
+      } else out <- paste0(out,',"preview_available":false')
     }
   }
-  cat(paste(c(head_out, "}"), collapse = ""))
-})
-"""
-)
-
+  cat(paste0(out,'}'))
+})'''
 
 class KernelDriver:
     def __init__(self):
@@ -342,6 +402,9 @@ class KernelDriver:
         self.language = "python"
         self.kernel_name = None
         self.kernel_info = {}
+        self._kernel_busy = False
+        self._active_kernel_msg_id = None
+        self._external_busy_msg_id = None
 
     def _install_kernel_spec(self, argv, display_name, language):
         """Write a throwaway kernelspec and expose it through JUPYTER_PATH.
@@ -467,6 +530,8 @@ class KernelDriver:
         import time
 
         msg_id = self.kc.execute(code, reply=False, store_history=store_history)
+        self._kernel_busy = True
+        self._active_kernel_msg_id = msg_id
         outputs = []
         error = None
         status = "ok"
@@ -552,8 +617,11 @@ class KernelDriver:
                 if not wait:
                     outputs = []
                     emit_progress(True)
-            elif msg_type == "status":
+            if msg_type == "status":
                 if content.get("execution_state") == "idle":
+                    if parent == msg_id:
+                        self._kernel_busy = False
+                        self._active_kernel_msg_id = None
                     break
 
         try:
@@ -813,150 +881,259 @@ class KernelDriver:
             },
         }
 
-    def _json_probe(self, code, timeout=10):
-        """Execute a short probe in the kernel and parse the last JSON stdout line."""
-        result = self._execute(code, timeout=timeout, store_history=False)
+    def _probe_busy_response(self):
+        return {
+            "status": "busy",
+            "source": "kernel_snapshot",
+            "kernel_state": "busy",
+            "truncated": False,
+        }
+
+    def _refresh_kernel_busy(self):
+        """Consume already-available IOPub status without queuing a request."""
+        if not self.kc:
+            return False
+        try:
+            while True:
+                msg = self.kc.iopub_channel.get_msg(timeout=0)
+                if msg.get("header", {}).get("msg_type") != "status":
+                    continue
+                state = (msg.get("content") or {}).get("execution_state")
+                if state == "busy":
+                    self._kernel_busy = True
+                    self._external_busy_msg_id = (msg.get("parent_header") or {}).get("msg_id")
+                elif state == "idle":
+                    parent = (msg.get("parent_header") or {}).get("msg_id")
+                    if parent and parent == self._external_busy_msg_id:
+                        self._kernel_busy = False
+                        self._external_busy_msg_id = None
+        except Exception:
+            pass
+        return bool(self._kernel_busy)
+
+    def _json_probe(self, code, timeout=10, max_chars=PROBE_DEFAULT_MAX_CHARS):
+        """Run one fixed safe probe; report transport/kernel failures explicitly."""
+        if not self.kc:
+            return {"status": "not_started", "source": "kernel_snapshot", "kernel_state": "not_started", "truncated": False}
+        if self._refresh_kernel_busy():
+            return self._probe_busy_response()
+        try:
+            result = self._execute(code, timeout=timeout, store_history=False)
+        except Exception:
+            return {"status": "error", "source": "kernel_snapshot", "kernel_state": "error", "truncated": False, "error": "probe transport failed"}
+        if result.get("status") == "timeout":
+            self._kernel_busy = True
+            return {"status": "timeout", "source": "kernel_snapshot", "kernel_state": "busy", "truncated": False, "error": "probe timed out; kernel was not interrupted"}
+        if result.get("status") != "ok":
+            return {"status": "error", "source": "kernel_snapshot", "kernel_state": result.get("kernel_state", "error"), "truncated": False, "error": "probe execution failed"}
         text = ""
         for out in result.get("outputs", []):
             if out.get("type") == "stream" and out.get("name") == "stdout":
                 text += out.get("text", "")
+        payload = None
         for line in reversed(text.splitlines()):
-            line = line.strip()
-            if not line:
-                continue
             try:
-                return json.loads(line)
+                payload = json.loads(line.strip())
+                break
             except Exception:
                 continue
-        return {}
+        if not isinstance(payload, dict):
+            return {"status": "error", "source": "kernel_snapshot", "kernel_state": "idle", "truncated": False, "error": "probe returned invalid JSON"}
+        cap = min(PROBE_MAX_MAX_CHARS, max(PROBE_MIN_MAX_CHARS, int(max_chars)))
+        payload.update({"status": "ok", "source": "kernel_snapshot", "kernel_state": "idle"})
+        # Bound the final wire payload without ever stringifying a kernel value.
+        try:
+            encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+            if len(encoded) > cap:
+                payload["truncated"] = True
+                if isinstance(payload.get("vars"), list):
+                    while payload["vars"] and len(json.dumps(payload, ensure_ascii=False, allow_nan=False)) > cap:
+                        payload["vars"].pop()
+                    payload["next_offset"] = payload.get("offset", 0) + len(payload["vars"])
+                else:
+                    payload.pop("preview", None)
+                    payload.pop("dataframe", None)
+                    payload.pop("truncated_columns", None)
+                    if len(json.dumps(payload, ensure_ascii=False, allow_nan=False)) > cap:
+                        payload = {"status": "ok", "source": "kernel_snapshot", "kernel_state": "idle", "found": payload.get("found", False), "name": payload.get("name", ""), "type": payload.get("type", "unknown"), "truncated": True}
+        except Exception:
+            return {"status": "error", "source": "kernel_snapshot", "kernel_state": "idle", "truncated": False, "error": "probe response was not JSON-safe"}
+        return payload
 
-    def list_vars(self):
-        """List variables in the kernel namespace without dumping large values."""
-        if not self.kc:
-            return {"vars": []}
-        if self.language.startswith("r"):
-            return self._json_probe(R_LIST_VARS, timeout=25) or {"vars": []}
-        return self._json_probe(
-            r'''
-import json as _dnb_json, types as _dnb_types
-_dnb_skip_types = (
-    _dnb_types.ModuleType,
-    _dnb_types.FunctionType,
-    _dnb_types.BuiltinFunctionType,
-    _dnb_types.MethodType,
-    type,
-)
-_dnb_vars = []
-for _dnb_n, _dnb_v in sorted(list(globals().items()), key=lambda kv: kv[0]):
-    if _dnb_n.startswith('_') or _dnb_n in {'In', 'Out', 'exit', 'quit'}:
-        continue
-    try:
-        if isinstance(_dnb_v, _dnb_skip_types):
-            continue
-        _dnb_t = type(_dnb_v)
-        _dnb_r = repr(_dnb_v)
-        _dnb_vars.append({
-            'name': _dnb_n,
-            'type': _dnb_t.__name__,
-            'module': getattr(_dnb_t, '__module__', ''),
-            'repr': _dnb_r[:300],
-            'value': _dnb_r[:300],
-        })
-    except Exception as _dnb_e:
-        _dnb_vars.append({'name': _dnb_n, 'type': 'unknown', 'module': '', 'repr': '<unrepresentable: %s>' % _dnb_e})
-print(_dnb_json.dumps({'vars': _dnb_vars}, ensure_ascii=False, allow_nan=False, default=str))
-''',
-            timeout=10,
-        ) or {"vars": []}
+    @staticmethod
+    def _probe_options(options, defaults, maxima):
+        options = options if isinstance(options, dict) else {}
+        result = {}
+        for key, default in defaults.items():
+            try:
+                value = int(options.get(key, default))
+            except (TypeError, ValueError, OverflowError):
+                value = default
+            result[key] = min(maxima[key], max(0, value))
+        result["max_chars"] = min(PROBE_MAX_MAX_CHARS, max(PROBE_MIN_MAX_CHARS, result.get("max_chars", PROBE_DEFAULT_MAX_CHARS)))
+        return result
 
-    def inspect_object(self, name):
-        """Return a structured summary for one live kernel variable."""
-        if not self.kc:
-            return {"found": False, "error": "kernel not started"}
-        name = str(name or "").strip()
-        if not name:
-            return {"found": False, "error": "name required"}
+    def list_vars(self, options=None):
+        """List bounded name/type/shape metadata only; never reads repr/value."""
+        opts = self._probe_options(
+            options,
+            {"offset": 0, "limit": PROBE_DEFAULT_LIST_LIMIT, "max_chars": PROBE_DEFAULT_MAX_CHARS},
+            {"offset": 1000000000, "limit": PROBE_MAX_LIST_LIMIT, "max_chars": PROBE_MAX_MAX_CHARS},
+        )
+        pattern = (options or {}).get("pattern", "") if isinstance(options, dict) else ""
+        pattern = pattern if isinstance(pattern, str) else ""
+        pattern = pattern[:256]
         if self.language.startswith("r"):
-            return self._json_probe(
-                R_INSPECT_OBJECT.replace("__DSH_NAME__", json.dumps(name, ensure_ascii=False)),
-                timeout=25,
-            ) or {"name": name, "found": False, "error": "no JSON result"}
-        return self._json_probe(
-            """
-import json as _dnb_json, inspect as _dnb_inspect
-_dnb_name = %r
-_dnb_out = {'name': _dnb_name, 'found': False}
-try:
-    _dnb_obj = globals()[_dnb_name]
-    _dnb_t = type(_dnb_obj)
-    _dnb_out.update({
-        'found': True,
-        'type': _dnb_t.__name__,
-        'module': getattr(_dnb_t, '__module__', ''),
-        'repr': repr(_dnb_obj)[:1000],
-    })
+            code = R_LIST_VARS.replace("__OFFSET__", str(opts["offset"])).replace("__LIMIT__", str(opts["limit"])).replace("__PATTERN__", json.dumps(pattern, ensure_ascii=False))
+        else:
+            code = r'''import json as _dnb_json, sys as _dnb_sys, math as _dnb_math
+_dnb_opts = __OPTIONS__
+_dnb_pattern = _dnb_opts['pattern'].casefold()
+_dnb_offset = _dnb_opts['offset']; _dnb_limit = _dnb_opts['limit']
+def _dnb_safe_type(_o):
+    _t = type(_o)
+    for _builtin in (type(None), bool, int, float, complex, str, bytes, bytearray, list, tuple, dict, set, frozenset, range):
+        if _t is _builtin: return type.__getattribute__(_t, '__name__'), type.__getattribute__(_t, '__module__')
+    _mods = _dnb_sys.modules
+    _np = _mods.get('numpy')
+    if _np is not None and _t is _np.ndarray: return 'ndarray', 'numpy'
+    _pd = _mods.get('pandas')
+    if _pd is not None and (_t is _pd.DataFrame or _t is _pd.Series): return type.__getattribute__(_t, '__name__'), 'pandas'
+    _ad = _mods.get('anndata')
+    if _ad is not None and _t is getattr(_ad, 'AnnData', None): return 'AnnData', 'anndata'
+    _sp = _mods.get('scipy.sparse')
+    if _sp is not None:
+        for _n in ('csr_matrix','csc_matrix','coo_matrix','bsr_matrix','dia_matrix','dok_matrix','lil_matrix','csr_array','csc_array','coo_array','bsr_array','dia_array','dok_array','lil_array'):
+            _c = getattr(_sp, _n, None)
+            if _c is not None and _t is _c: return _n, 'scipy.sparse'
+    return type.__getattribute__(_t, '__name__'), type.__getattribute__(_t, '__module__')
+def _dnb_primitive(_v):
+    _t = type(_v)
+    if _v is None or _t is bool: return _v
+    if _t is int:
+        try: return _v if len(str(_v)) <= 128 else {'type':'int'}
+        except Exception: return {'type':'int'}
+    if _t is float: return _v if _dnb_math.isfinite(_v) else None
+    if _t is str: return _v[:128]
+    if _t is bytes: return {'type':'bytes','length':len(_v)}
+    _np = _dnb_sys.modules.get('numpy')
+    if _np is not None:
+        for _c in (_np.bool_, _np.integer, _np.floating, _np.str_, _np.bytes_):
+            # isinstance, not `type(v) is c`: np.int64 is not np.integer itself,
+            # it is a subclass, so an identity check would miss every real value.
+            if isinstance(_v, _c):
+                try: return _dnb_primitive(_v.item())
+                except Exception: return {'type':type(_v).__name__}
+    return {'type':_dnb_safe_type(_v)[0]}
+def _dnb_shape(_o, _kind):
     try:
-        _dnb_doc = _dnb_inspect.getdoc(_dnb_obj) or ''
-        _dnb_out['doc'] = _dnb_doc[:2000]
-    except Exception:
-        _dnb_out['doc'] = ''
+        if _kind == 'ndarray': return [int(x) for x in _o.shape]
+        if _kind in ('DataFrame','Series'): return [int(x) for x in _o.shape]
+        if _kind == 'AnnData': return [int(x) for x in _o.shape]
+        if _kind.endswith(('_matrix','_array')) and _dnb_safe_type(_o)[1]=='scipy.sparse': return [int(x) for x in _o.shape]
+    except Exception: return None
+    if _kind in ('list','tuple','dict','set','frozenset','range','str','bytes','bytearray'):
+        try: return [len(_o)]
+        except Exception: return None
+    return None
+_dnb_names = sorted(_n for _n in globals() if not _n.startswith('_') and _n not in {'In','Out','exit','quit'} and (not _dnb_pattern or _dnb_pattern in _n.casefold()))
+_dnb_total = len(_dnb_names); _dnb_selected = _dnb_names[_dnb_offset:_dnb_offset+_dnb_limit]; _dnb_vars=[]
+for _n in _dnb_selected:
+    _v = globals()[_n]; _type,_module = _dnb_safe_type(_v)
+    _item={'name':_n[:256], 'type':_type, 'module':_module}
+    _shape = _dnb_shape(_v,_type)
+    if _shape is not None: _item['shape']=_shape
+    _dnb_vars.append(_item)
+_dnb_next = _dnb_offset+len(_dnb_selected)
+print(_dnb_json.dumps({'vars':_dnb_vars,'total':_dnb_total,'offset':_dnb_offset,'next_offset':_dnb_next if _dnb_next<_dnb_total else None,'truncated':_dnb_next<_dnb_total},ensure_ascii=False,allow_nan=False))'''.replace("__OPTIONS__", json.dumps({"pattern": pattern, **opts}, ensure_ascii=False))
+        return self._json_probe(code, timeout=10, max_chars=opts["max_chars"])
+
+    def inspect_object(self, name, options=None):
+        """Describe one exact namespace name; values require preview=true."""
+        if not isinstance(name, str) or not name or len(name) > 256:
+            return {"status": "error", "source": "kernel_snapshot", "kernel_state": "idle", "found": False, "truncated": False, "error": "invalid variable name"}
+        opts = self._probe_options(
+            options,
+            {"preview": 0, "rows": PROBE_DEFAULT_ROWS, "columns": PROBE_DEFAULT_COLUMNS, "max_chars": PROBE_DEFAULT_MAX_CHARS},
+            {"preview": 1, "rows": PROBE_MAX_ROWS, "columns": PROBE_MAX_COLUMNS, "max_chars": PROBE_MAX_MAX_CHARS},
+        )
+        want_preview = bool((options or {}).get("preview", False)) if isinstance(options, dict) else False
+        opts["preview"] = int(want_preview)
+        if self.language.startswith("r"):
+            code = R_INSPECT_OBJECT.replace("__NAME__", json.dumps(name, ensure_ascii=False)).replace("__PREVIEW__", str(opts["preview"])).replace("__ROWS__", str(opts["rows"])).replace("__COLUMNS__", str(opts["columns"]))
+        else:
+            code = r'''import json as _dnb_json, sys as _dnb_sys, math as _dnb_math
+_dnb_name=__NAME__; _dnb_want=bool(__PREVIEW__); _dnb_rows=__ROWS__; _dnb_cols=__COLUMNS__
+def _dnb_safe_type(_o):
+    _t=type(_o)
+    for _b in (type(None),bool,int,float,complex,str,bytes,bytearray,list,tuple,dict,set,frozenset,range):
+        if _t is _b:return type.__getattribute__(_t,'__name__'),type.__getattribute__(_t,'__module__')
+    _mods=_dnb_sys.modules; _np=_mods.get('numpy'); _pd=_mods.get('pandas'); _ad=_mods.get('anndata'); _sp=_mods.get('scipy.sparse')
+    if _np is not None and _t is _np.ndarray:return 'ndarray','numpy'
+    if _pd is not None and (_t is _pd.DataFrame or _t is _pd.Series):return type.__getattribute__(_t,'__name__'),'pandas'
+    if _ad is not None and _t is getattr(_ad,'AnnData',None):return 'AnnData','anndata'
+    if _sp is not None:
+        for _n in ('csr_matrix','csc_matrix','coo_matrix','bsr_matrix','dia_matrix','dok_matrix','lil_matrix','csr_array','csc_array','coo_array','bsr_array','dia_array','dok_array','lil_array'):
+            _c=getattr(_sp,_n,None)
+            if _c is not None and _t is _c:return _n,'scipy.sparse'
+    return type.__getattribute__(_t,'__name__'),type.__getattribute__(_t,'__module__')
+def _dnb_scalar(_v):
+    _t=type(_v)
+    if _v is None or _t is bool:return _v
+    if _t is int:
+        try:return _v if len(str(_v))<=128 else {'type':'int'}
+        except Exception:return {'type':'int'}
+    if _t is float:return _v if _dnb_math.isfinite(_v) else None
+    if _t is str:return _v[:128]
+    if _t is bytes:return {'type':'bytes','length':len(_v)}
+    _np=_dnb_sys.modules.get('numpy')
+    if _np is not None:
+        for _c in (_np.bool_,_np.integer,_np.floating,_np.str_,_np.bytes_):
+            # isinstance, not `type(v) is c` - np.int64 subclasses np.integer.
+            if isinstance(_v,_c):
+                try:return _dnb_scalar(_v.item())
+                except Exception:return {'type':type(_v).__name__}
+    return {'type':_dnb_safe_type(_v)[0]}
+def _dnb_label(_v):
+    _x=_dnb_scalar(_v)
+    return _x if type(_x) in (str,int,float,bool) or _x is None else _x
+_dnb_out={'name':_dnb_name,'found':False}
+if _dnb_name in globals():
+    _o=globals()[_dnb_name]; _kind,_module=_dnb_safe_type(_o); _dnb_out.update({'found':True,'type':_kind,'module':_module,'preview_available':False})
     try:
-        import pandas as _dnb_pd
-        if isinstance(_dnb_obj, _dnb_pd.DataFrame):
-            _dnb_df = _dnb_obj
-            _dnb_cols = [str(c) for c in list(_dnb_df.columns)[:50]]
-            _dnb_dtype = {str(c): str(_dnb_df[c].dtype) for c in list(_dnb_df.columns)[:50]}
-            _dnb_missing = {str(c): int(_dnb_df[c].isna().sum()) for c in list(_dnb_df.columns)[:50]}
-            _dnb_head = _dnb_df.head(5).copy()
-            _dnb_head.columns = [str(c) for c in _dnb_head.columns]
-            try:
-                _dnb_head = _dnb_head.astype(object).where(_dnb_head.notna(), None)
-            except Exception:
-                pass
-            _dnb_num = {}
-            try:
-                _dnb_desc = _dnb_df.select_dtypes(include='number').iloc[:, :20].describe().transpose()
-                for _dnb_idx, _dnb_row in _dnb_desc.iterrows():
-                    _dnb_num[str(_dnb_idx)] = {str(k): (None if _dnb_pd.isna(v) else float(v)) for k, v in _dnb_row.to_dict().items()}
-            except Exception as _dnb_e:
-                _dnb_num = {'error': str(_dnb_e)}
-            _dnb_cat = {}
-            try:
-                for _dnb_c in list(_dnb_df.select_dtypes(exclude='number').columns)[:20]:
-                    _dnb_vc = _dnb_df[_dnb_c].astype('string').value_counts(dropna=False).head(10)
-                    _dnb_cat[str(_dnb_c)] = {
-                        'n_unique': int(_dnb_df[_dnb_c].nunique(dropna=True)),
-                        'top_values': {str(k): int(v) for k, v in _dnb_vc.items()},
-                    }
-            except Exception as _dnb_e:
-                _dnb_cat = {'error': str(_dnb_e)}
-            _dnb_out['dataframe'] = {
-                'kind': 'pandas.DataFrame',
-                'shape': [int(_dnb_df.shape[0]), int(_dnb_df.shape[1])],
-                'columns': _dnb_cols,
-                'truncated_columns': int(max(0, _dnb_df.shape[1] - len(_dnb_cols))),
-                'dtypes': _dnb_dtype,
-                'index': {
-                    'type': type(_dnb_df.index).__name__,
-                    'name': None if _dnb_df.index.name is None else str(_dnb_df.index.name),
-                    'is_unique': bool(_dnb_df.index.is_unique),
-                },
-                'memory_usage_bytes': int(_dnb_df.memory_usage(index=True, deep=True).sum()),
-                'missing': _dnb_missing,
-                'head': _dnb_head.to_dict(orient='records'),
-                'numeric_summary': _dnb_num,
-                'categorical_summary': _dnb_cat,
-            }
-    except Exception as _dnb_e:
-        _dnb_out['introspection_error'] = str(_dnb_e)
-except KeyError:
-    _dnb_out['error'] = 'variable not found'
-except Exception as _dnb_e:
-    _dnb_out['error'] = str(_dnb_e)
-print(_dnb_json.dumps(_dnb_out, ensure_ascii=False, allow_nan=False, default=str))
-""" % name,
-            timeout=15,
-        ) or {"name": name, "found": False, "error": "no JSON result"}
+        if _kind=='ndarray':_dnb_out['shape']=[int(x) for x in _o.shape]; _dnb_out['dtype']=_o.dtype.name
+        elif _kind in ('DataFrame','Series'):_dnb_out['shape']=[int(x) for x in _o.shape]
+        elif _kind=='AnnData':_dnb_out.update({'shape':[int(x) for x in _o.shape],'isbacked':bool(_o.isbacked)})
+        elif _kind.endswith(('_matrix','_array')) and _module=='scipy.sparse':_dnb_out.update({'shape':[int(x) for x in _o.shape],'nnz':int(_o.nnz)})
+        elif _kind in ('list','tuple','dict','set','frozenset','range','str','bytes','bytearray'):_dnb_out['length']=len(_o)
+    except Exception:pass
+    _np=_dnb_sys.modules.get('numpy'); _pd=_dnb_sys.modules.get('pandas')
+    if _dnb_want:
+        if _kind in ('NoneType','bool','int','float','complex','str','bytes'):
+            _dnb_out.update({'preview_available':True,'preview':{'value':_dnb_scalar(_o)}})
+        elif _kind in ('list','tuple'):
+            _vals=[_dnb_scalar(_o[i]) for i in range(min(len(_o),_dnb_rows))]; _dnb_out.update({'preview_available':True,'preview':{'values':_vals,'truncated':len(_vals)<len(_o)}})
+        elif _kind=='dict':
+            _vals=[]
+            for _k in list(_o.keys())[:_dnb_rows]:_vals.append({'key':_dnb_scalar(_k),'value':_dnb_scalar(_o[_k])})
+            _dnb_out.update({'preview_available':True,'preview':{'items':_vals,'truncated':len(_vals)<len(_o)}})
+        elif _kind=='ndarray' and _np is not None and type(_o) is _np.ndarray:
+            _dnb_out['preview_available']=True; _vals=[]
+            for _i in range(min(int(_o.size),_dnb_rows)):
+                try:_vals.append(_dnb_scalar(_o.flat[_i]))
+                except Exception:_vals.append(None)
+            _dnb_out['preview']={'values':_vals,'truncated':len(_vals)<int(_o.size)}
+        elif _kind=='Series' and _pd is not None and type(_o) is _pd.Series:
+            _vals=[_dnb_scalar(_o.iat[_i]) for _i in range(min(len(_o),_dnb_rows))]; _dnb_out.update({'preview_available':True,'preview':{'values':_vals,'truncated':len(_vals)<len(_o)}})
+        elif _kind=='DataFrame' and _pd is not None and type(_o) is _pd.DataFrame:
+            _nr=min(len(_o.index),_dnb_rows); _nc=min(len(_o.columns),_dnb_cols); _labels=[_dnb_label(_o.columns[_j]) for _j in range(_nc)]; _rows=[]
+            for _i in range(_nr):_rows.append([_dnb_scalar(_o.iat[_i,_j]) for _j in range(_nc)])
+            _dnb_out.update({'preview_available':True,'preview':{'columns':_labels,'rows':_rows},'truncated_columns':max(0,len(_o.columns)-_nc)})
+'''
+            code = code.replace("_dnb_name=__NAME__; _dnb_want=bool(__PREVIEW__); _dnb_rows=__ROWS__; _dnb_cols=__COLUMNS__", "_dnb_name=" + json.dumps(name, ensure_ascii=False) + "; _dnb_want=" + str(want_preview) + "; _dnb_rows=" + str(opts["rows"]) + "; _dnb_cols=" + str(opts["columns"]))
+            code += "print(_dnb_json.dumps(_dnb_out,ensure_ascii=False,allow_nan=False))\n"
+        return self._json_probe(code, timeout=10, max_chars=opts["max_chars"])
+
 
     def load_ipynb(self, path):
         with open(path, "r", encoding="utf-8") as handle:
@@ -1165,10 +1342,10 @@ def _handle(driver, req):
             res = driver.get_state()
             _send({"id": req_id, "ok": True, **res})
         elif cmd == "list_vars":
-            res = driver.list_vars()
+            res = driver.list_vars(req)
             _send({"id": req_id, "ok": True, **res})
         elif cmd == "inspect_object":
-            res = driver.inspect_object(req.get("name", ""))
+            res = driver.inspect_object(req.get("name", ""), req)
             _send({"id": req_id, "ok": True, **res})
         elif cmd == "load_ipynb":
             res = driver.load_ipynb(req["path"])

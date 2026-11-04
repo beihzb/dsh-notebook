@@ -33,7 +33,7 @@ Because the kernel is persistent, the agent is operating on stateful runtime sta
 
 - **Real persistent kernel**: `ipykernel` + `jupyter_client` sidecar — variables persist across cells. **R kernels** (`IRkernel`) are supported too, picked from the same dropdown.
 - **Agent tools** to read, edit, run, and inspect cells (`nb_get`, `nb_edit_cell`, `nb_run_cell`, ...) with structured access to outputs and tracebacks.
-- **Runtime introspection for agents**: `nb_context`, `nb_list_vars`, and `nb_inspect_object` expose live kernel variables and compact notebook state; pandas `DataFrame` objects get shape / dtype / missing-value / head / summary metadata.
+- **Runtime introspection for agents (safety-first)**: `nb_context`, `nb_list_vars`, and `nb_inspect_object` expose live kernel variables and compact notebook state, but **never call `repr()` on an arbitrary object**. `nb_list_vars` returns name, exact type, and shape only, with `pattern` filtering and `offset`/`limit` paging (default 100, max 200, `max_chars` bounds the payload); `nb_inspect_object` returns type/shape by default and only a bounded preview when `preview=true` is passed **and** the object is an allowlisted exact type (builtin containers and scalars, NumPy arrays, pandas `DataFrame`/`Series`, scipy sparse matrices, `AnnData` shape/`isbacked`). Unknown types stay metadata-only. With no kernel running it answers `not_started` (**it will not start one just to look at variables**); while a cell is executing it answers `busy` (**it will not queue behind or ahead of your code**), and a probe timeout never interrupts your cell.
 - **Safe AI edit loop**: rich per-cell version snapshots, `nb_cell_history`, `nb_revert_cell`, `nb_error_context`, and `nb_edit_and_run_cell` support auditable repair-and-rerun workflows.
 - **VS Code-aligned cell UI**: circular run control, `Queued` / `Executing` status bar, execution-number glyph.
 - **VS Code-aligned execution semantics**: Restart keeps completed outputs, Interrupt stops only the current cell, Run All stops on error, plus Clear Outputs and Restart & Clear.
@@ -68,7 +68,7 @@ Because the kernel is persistent, the agent is operating on stateful runtime sta
 - **Scroll position survives View switches (v0.3.0)**: the shell renders one View at a time, so switching to 对话 used to unmount the notebook and reset it to the top. The scroll offset and each cell's folded/expanded choice are now remembered per session and restored when you come back.
 - **DSH 0.2.0 support (v0.3.0)**: `peerDependencies` now cover both the `0.1.x-rc` and `0.2.0-rc` lines (`@deepseek-ai/dsh-tools: ^0.1.0-rc.6 || ^0.2.0-rc.1`), so DSH's startup compatibility gate no longer refuses the plugin on a 0.2.x runtime — the old `^0.1.0-rc.6` range capped at `<0.2.0`, and the gate skips the whole bundle when a `@deepseek-ai/dsh*` peer excludes the running version. The client manifest also now names `@deepseek-ai/dsh-client-ui-renderer` (the client row that actually provides the `slots` service) instead of `@deepseek-ai/dsh-client-runtime`, a package that does not exist.
 - **Session-aware kernel default (v0.3.1)**: the default kernel follows the **current** session's `dsh-envsel` selection. Before this, the plugin took whichever selection happened to be stored last in the file, so a notebook could land in an environment an unrelated session had picked; and every delegated subagent found nothing at all, because a subagent runs in its own session. A session with no selection of its own now inherits the nearest selecting session it descends from.
-- **R kernels (v0.4.0)**: the kernel picker now lists R kernels, discovered the way Jupyter discovers them — kernelspecs in the user data dir, kernelspecs shipped inside a conda env (`<env>/share/jupyter/kernels`), and conda environments that merely have `IRkernel` installed in their R library (synthesised). A conda R is started with its env's DLL directories on `PATH` and `R_HOME` set, because launching the bare binary dies instantly with `0xC0000135` (DLL not found); a kernelspec whose `argv[0]` is just `"R"` is resolved to the absolute binary so it works without activating the env. `nb_list_vars` / `nb_inspect_object` have R implementations (`ls`/`class`/`deparse`, plus `data.frame` rows/cols/column types), and saving writes the real `kernelspec.language` (`r` or `python`).
+- **R kernels (v0.4.0)**: the kernel picker now lists R kernels, discovered the way Jupyter discovers them — kernelspecs in the user data dir, kernelspecs shipped inside a conda env (`<env>/share/jupyter/kernels`), and conda environments that merely have `IRkernel` installed in their R library (synthesised). A conda R is started with its env's DLL directories on `PATH` and `R_HOME` set, because launching the bare binary dies instantly with `0xC0000135` (DLL not found); a kernelspec whose `argv[0]` is just `"R"` is resolved to the absolute binary so it works without activating the env. Saving writes the real `kernelspec.language` (`r` or `python`). R-side variable introspection is deliberately conservative: names and paging always work, but a binding is only typed when that can be decided safely — `bindingIsActive()` skips active bindings, and a `delayedAssign` promise is never typed or previewed, because base R has no supported way to recognise one without forcing it (and forcing runs user code). When `rlang` is **already loaded** in that session, its lazy-binding predicate unlocks types and bounded previews; the plugin never loads a package itself.
 - **`nbformat` is no longer required (v0.4.0)**: reading and writing `.ipynb` is done with the standard library. Previously the sidecar did `import nbformat` when opening or saving a notebook, so a conda env that had `ipykernel` + `jupyter_client` but not `nbformat` failed with `Operation failed: No module named 'nbformat'` — and a lean or R-only environment could never have it at all. Output is byte-identical to `nbformat.write()` (indent/sort/CRLF/line-splitting all match), so files written here and by Jupyter do not churn in git.
 - **Lossless notebook round-trip (v0.4.0)**: anything the plugin does not model — markdown `attachments` (pasted images), per-output `metadata` (widget view sizes), notebook `metadata.widgets` state, vendor keys — is carried through untouched instead of being dropped on save. `nbformat` **3** notebooks (pre-2015 `worksheets`/`input`/`prompt_number`/`png` aliases) are upgraded to v4 on read rather than being read as an empty notebook and wiped on the next save; 4.0–4.4 files gain cell ids the same way `nbformat.read` does.
 - **The hybrid-CPU hint can be reopened (v0.4.0)**: dismissing it used to be permanent for the browser session with no way back. The CPU probe result is now kept for the session and a `⚡ 大小核` / `⚡ Hybrid CPU` toolbar button reopens the same panel; only the *automatic* popup stays dismissed.
@@ -137,6 +137,22 @@ Then restart `dsh web`. A **Notebook** tab appears at the top of the session.
 `nb_run_cell` / `nb_run_all` / `nb_apply_suggestion` /
 `nb_kernel_restart` / `nb_kernel_restart_and_clear` / `nb_kernel_interrupt` /
 `nb_kernel_list` / `nb_kernel_select` / `nb_clear_outputs` / `nb_set_cwd`
+
+### Introspection contract
+
+```text
+nb_list_vars({ pattern?, offset?, limit?, max_chars? })
+  -> { status, source, kernel_state, vars:[{name,type,module?,shape?}],
+       total, offset, next_offset, truncated }
+
+nb_inspect_object({ name, preview?, rows?, columns?, max_chars? })
+  -> { status, name, found, type, module?, shape?, preview_available,
+       preview?, truncated_columns?, binding? }
+```
+
+- `status` is `ok` / `busy` / `not_started` / `timeout` / `error`. `busy` and `not_started` are answers, not failures: retry at another moment instead of starting a kernel.
+- `name` is a **literal**, never an expression — `__import__('os')` yields `found: false`.
+- No variable contents are returned unless `preview: true`, and even then only for allowlisted exact types, bounded to 20 rows / 50 columns and a `max_chars` budget (1024–64000).
 
 ## License
 
