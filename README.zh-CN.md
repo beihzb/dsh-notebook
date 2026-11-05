@@ -65,7 +65,9 @@
 - **长输出折叠真正可用（v0.3.0）**：v0.2.2 加上的折叠从未生效——唯一产生高度钳制的 `fold` 类，其判定却来自"已被钳制元素"的测量，溢出永远测不到，按钮也就不出现。现在改为测量内层未被钳制的元素，且折叠高度与判定共用同一个 `FOLD_PX` 常量；按钮还会显示隐藏规模（如「展开全部（3,000 行）」）。
 - **超大输出只渲染头尾（v0.3.0）**：单个文本块超过 4,000 行或 200 KB 时，只渲染前 300 行 + 后 100 行，并明确标注「… 已省略 N 行」与一键「显示全部 N 行」——500 KB 的流不必为了折叠而全部驻留 DOM。
 - **全新会话也能进 Notebook（v0.3.0）**：会话空白时 DSH 不渲染 `conversation.view` slot，所以此前必须先发一句话才能看到 Notebook 标签。现在空白会话的输入框上方会出现「📓 在本会话打开 Notebook」入口，点击即激活本视图并让常规视图标签栏出现（随后宿主会记住该会话的选择）。
-- **切换视图不再丢滚动位置（v0.3.0）**：宿主同一时刻只渲染一个视图，切到「对话」会卸载 notebook 并把位置重置到顶部。现在滚动偏移与每个 cell 的展开/折叠选择都按会话记忆，切回来自动恢复。
+- **切换视图不再丢滚动位置（v0.3.0 引入，v0.4.2 才真正生效）**：宿主同一时刻只渲染一个视图，切到「对话」会卸载 notebook，滚动位置随之丢失。v0.3.0 的实现其实**从未生效**：它保存和恢复的是 `.dnb-body` 的偏移，而这个元素有 `overflow:auto` 却没有高度约束，会跟着 cell 一起长高、根本不会滚动，`scrollTop` 永远是 0。在运行中的界面里实测：`.dnb-body` 是 3732/3732（不可滚动），真正在滚的是宿主的 `.wSkVaW_scrollBody`（3942/519）。v0.4.2 重做：向上找到**第一个真正可滚动**的祖先作为容器；在 document 捕获阶段接滚动事件（元素 scroll 不冒泡，且宿主会换节点）；切换时宿主把容器重置为 0 的那次不再被当成"用户滚到顶"；恢复用 **cell 锚定**（`{id, delta}`）而不是像素偏移，所以上方内容高度变化也不会漂移；恢复在布局阶段、浏览器绘制之前完成，并复用上一次的快照，切回来直接落在正确的 cell 上，没有加载空档。
+- **R 内核进程树会被回收（v0.4.2）**：`stop()` 现在先杀整棵进程树（Windows 用 `taskkill /F /T`，其它平台 `killpg`）再 `shutdown_kernel`。conda 的 `R.exe` 只是启动器，真正的计算进程是它拉起的 `Rterm.exe`，只给启动器发信号会留下孤儿 `Rterm.exe`。
+- **大小核提示只在 Windows 且按内核语言给（v0.4.2）**：此前 macOS/Linux 也会弹这个面板，但 macOS 根本没有 per-process 亲和性 API，Linux 上免装工具能读到的拓扑信号不可靠。现在探测只在 `win32` 做，面板会写明**本会话是哪个内核**，并按内核语言给片段：Python 用 `psutil`；R 用 `system2("powershell", …)` 把脚本写成临时 `.ps1` 再用 `-File` 执行（把 `-Command` 字符串穿过 R → PowerShell 两层转义时曾被原样回显而没有真正执行），目标是自己 `Sys.getpid()`——也就是真正干活的 `Rterm.exe`。
 - **支持 DSH 0.2.0（v0.3.0）**：`peerDependencies` 现在同时覆盖 `0.1.x-rc` 与 `0.2.0-rc` 两条线（`@deepseek-ai/dsh-tools: ^0.1.0-rc.6 || ^0.2.0-rc.1`），DSH 启动期的兼容性门禁不再拒绝本插件——旧的 `^0.1.0-rc.6` 上界是 `<0.2.0`，而只要有 `@deepseek-ai/dsh*` peer 不满足当前运行版本，门禁会**跳过整个 bundle**。client 清单里也改为指向真正提供 `slots` 服务的 client row `@deepseek-ai/dsh-client-ui-renderer`，不再引用根本不存在的 `@deepseek-ai/dsh-client-runtime`。
 - **默认内核跟随本会话（v0.3.1）**：默认内核现在读取**当前会话**的 `dsh-envsel` 选择。此前它取的是存储文件里"最后一个"选择，于是 notebook 可能落到某个不相干会话挑的环境上；而被派出的子代理因为各自拥有独立会话，根本查不到任何选择。现在自身没有选择的会话会继承它向上最近的那个有选择的会话。
 - **支持 R 内核（v0.4.0）**：内核下拉框现在会列出 R 内核，来源与 Jupyter 一致——用户数据目录里的 kernelspec、conda 环境自带的 `<env>/share/jupyter/kernels`、以及只在 R library 里装了 `IRkernel` 的 conda 环境（自动合成）。conda 的 R 启动时会把该环境的 DLL 目录塞进 `PATH` 并设好 `R_HOME`，否则直接起二进制会以 `0xC0000135`（找不到 DLL）秒退；kernelspec 里 `argv[0]` 只写 `"R"` 的情况会解析成绝对路径，因此在未激活环境时也能用。保存时写入真实的 `kernelspec.language`（`r` 或 `python`）。R 侧的变量自省是**保守**的：函数名和分页永远可用，但只有在能安全判定时才会给出类型——`bindingIsActive()` 用来跳过 active binding；`delayedAssign` 建立的 promise 在 base R 里没有受支持的非强制求值判定方式，因此一律不类型化、不预览（避免探测本身触发用户代码）。如果该 R 会话已经加载了 `rlang`，就用它的 lazy-binding 谓词打开类型化与有限预览；插件**不会**自己 library 任何包。
@@ -95,12 +97,12 @@
 ## 安装
 
 ```bash
-dsh plugin --profile web add @beihaizb/dsh-notebook@0.4.1
+dsh plugin --profile web add @beihaizb/dsh-notebook@0.4.2
 ```
 
 然后重启 `dsh web`。会话顶部会出现 **Notebook** 标签。
 
-> **版本锁定说明**：如果刚发布不久就安装，pnpm 的供应链策略（`minimumReleaseAge`）可能跳过刚发布的版本、自动装到旧版。遇到这种情况请像上面那样显式指定版本号（`@beihaizb/dsh-notebook@0.4.1`），或等发布超过策略窗口后用 `@beihaizb/dsh-notebook@latest`。
+> **版本锁定说明**：如果刚发布不久就安装，pnpm 的供应链策略（`minimumReleaseAge`）可能跳过刚发布的版本、自动装到旧版。遇到这种情况请像上面那样显式指定版本号（`@beihaizb/dsh-notebook@0.4.2`），或等发布超过策略窗口后用 `@beihaizb/dsh-notebook@latest`。本地打包的 tarball 用 `dsh plugin --profile web add <file.tgz> --config.minimumReleaseAge=0` 安装。
 
 ### 内核选择
 
